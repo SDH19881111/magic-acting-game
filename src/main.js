@@ -812,6 +812,10 @@ function handlePlayerUpdate(data) {
         } else if (joinedMidRound) {
             showScreen('screen-waiting');
             elWaitingMsg.innerText = "진행중인 라운드입니다. 잠시 기다려주세요.";
+        } else if (me.hasGuessed) {
+            // 이미 정답을 제출한 사람은 결과를 기다림 (상태 기반으로 화면 고정)
+            showScreen('screen-waiting');
+            elWaitingMsg.innerText = "결과를 기다리는 중...";
         } else {
             if (lastStatus !== 'guessing') {
                 myGuess1 = null;
@@ -960,8 +964,12 @@ function renderGuessCards(phase) {
                 elGuess2Cards.style.pointerEvents = 'none';
                 await submitGuess(currentPin, currentUid, myGuess1, myGuess2, Date.now() - r.guessStartTime);
                 elGuess2Cards.style.pointerEvents = 'auto';
-                showScreen('screen-waiting');
-                elWaitingMsg.innerText = "결과를 기다리는 중...";
+                // 제출을 기다리는 사이 이미 결과(result 등)로 넘어갔다면 대기화면으로 덮어쓰지 않음
+                // (그렇지 않으면 순위표 화면을 가려 한 명만 화면이 멈추는 버그 발생)
+                if (roomData?.status === 'guessing') {
+                    showScreen('screen-waiting');
+                    elWaitingMsg.innerText = "결과를 기다리는 중...";
+                }
             };
             elGuess2Cards.appendChild(div);
         });
