@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>명연기 팡팡! 마법의 한마디</title>
+    <link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/src/style.css">
+  </head>
+  <body>
+    <div id="app">
+        <!-- Screen: Landing -->
+        <div id="screen-landing" class="screen active">
+            <div class="landing-content">
+                <h1 class="main-title">명연기 팡팡! <span class="subtitle">마법의 한마디</span></h1>
+                
+                <div class="join-card box-glass">
+                    <h3>게임 참가하기</h3>
+                    <input type="text" id="join-pin" placeholder="방 코드 (6자리 숫자)" maxlength="6" autocomplete="off">
+                    <input type="text" id="join-nickname" placeholder="내 닉네임" maxlength="10" autocomplete="off">
+                    <button id="btn-join" class="btn-primary">입장하기</button>
+                </div>
+                
+                <div class="host-section">
+                    <button id="btn-create-room" class="btn-text">선생님(호스트) 방 만들기</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Screen: Host Dashboard -->
+        <div id="screen-host" class="screen">
+            <header class="host-header box-glass">
+                <h2>👑 호스트 대시보드</h2>
+                <div class="pin-display">방 접속 코드: <span id="host-pin" class="highlight">---</span></div>
+            </header>
+            
+            <div class="dashboard-grid">
+                <div class="panel box-glass">
+                    <h3>게임 설정</h3>
+                    <div class="setting-group">
+                        <label>관람 시간(초) <input type="number" id="setting-watch-time" value="30"></label>
+                        <label>문제풀이 시간(초) <input type="number" id="setting-guess-time" value="15"></label>
+                        <label>보기 카드 수 <input type="number" id="setting-card-count" value="6"></label>
+                    </div>
+                    <button id="btn-save-settings" class="btn-secondary">설정 저장</button>
+                </div>
+                <div class="panel box-glass">
+                    <h3>참가자 목록 (<span id="host-player-count">0</span>명)</h3>
+                    <ul id="host-player-list" class="player-list"></ul>
+                </div>
+            </div>
+            
+            <div class="action-bar">
+                <button id="btn-host-start" class="btn-huge bounce">🚀 게임 시작</button>
+                <button id="btn-host-void" class="btn-danger">이번 라운드 무효화</button>
+            </div>
+        </div>
+
+        <!-- Screen: Waiting Room (Players) -->
+        <div id="screen-waiting" class="screen theme-dark center-content">
+            <h2 id="waiting-msg" class="pulse">선생님이 게임을 시작할 때까지 기다려주세요!</h2>
+            <div class="my-info box-glass">
+                나의 닉네임: <span id="my-nickname" class="highlight"></span><br>
+                현재 점수: <span id="my-score" class="highlight">100</span>점
+            </div>
+        </div>
+
+        <!-- Screen: Actor -->
+        <div id="screen-actor" class="screen theme-dark center-content">
+            <h2 class="actor-title pulse">당신이 연기자입니다!</h2>
+            <div class="actor-card-container">
+                <div class="actor-card emotion-card">
+                    <span class="card-label">감정</span>
+                    <h1 id="actor-emotion">---</h1>
+                </div>
+                <div class="actor-card situation-card">
+                    <span class="card-label">상황</span>
+                    <h1 id="actor-situation">---</h1>
+                </div>
+            </div>
+            <button id="btn-actor-done" class="btn-huge">🎬 연기가 끝났나요?</button>
+            <div id="actor-timer" class="timer-text">30</div>
+        </div>
+
+        <!-- Screen: Blind Mode (Guessers waiting) -->
+        <div id="screen-blind" class="screen theme-dark center-content">
+            <h1 class="blind-title bounce">👀 연기에 집중하세요!</h1>
+            <div class="countdown-circle">
+                <span id="blind-timer">30</span>
+            </div>
+        </div>
+
+        <!-- Screen: Guess Phase 1 (Emotion) -->
+        <div id="screen-guess1" class="screen theme-blue">
+            <div class="guess-header">
+                <h2>1단계: 어떤 감정일까요?</h2>
+                <div class="guess-timer" id="guess1-timer">15</div>
+            </div>
+            <div id="guess1-cards" class="card-grid"></div>
+        </div>
+
+        <!-- Screen: Guess Phase 2 (Situation) -->
+        <div id="screen-guess2" class="screen theme-red">
+            <div class="guess-header">
+                <h2>2단계: 어떤 상황일까요?</h2>
+                <div class="guess-timer" id="guess2-timer">15</div>
+            </div>
+            <div id="guess2-cards" class="card-grid"></div>
+        </div>
+
+        <!-- Screen: Sync Popup (3, 2, 1, 시작!) -->
+        <div id="screen-sync" class="overlay-screen hidden">
+            <h1 id="sync-text" class="zoom-in">3</h1>
+        </div>
+
+        <!-- Screen: Results -->
+        <div id="screen-result" class="screen theme-dark">
+            <h2>라운드 결과</h2>
+            <div class="result-answer box-glass">
+                정답: <span id="result-emotion" class="color-blue"></span> <br>+ <span id="result-situation" class="color-red"></span>
+            </div>
+            <div class="scoreboard box-glass">
+                <h3>순위표</h3>
+                <ul id="result-list" class="player-list"></ul>
+            </div>
+            <div id="result-next-msg" class="pulse">잠시 후 다음 라운드가 시작됩니다... <span id="result-timer">10</span></div>
+        </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
