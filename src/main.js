@@ -93,6 +93,9 @@ const btnSaveDeck = document.getElementById('btn-save-deck');
 const elMyNickname = document.getElementById('my-nickname');
 const elMyScore = document.getElementById('my-score');
 const elWaitingMsg = document.getElementById('waiting-msg');
+const readyActorBlock = document.getElementById('ready-actor');
+const readyGuesserBlock = document.getElementById('ready-guesser');
+const btnReadyStart = document.getElementById('btn-ready-start');
 const elActorEmotion = document.getElementById('actor-emotion');
 const elActorSituation = document.getElementById('actor-situation');
 const btnActorDone = document.getElementById('btn-actor-done');
@@ -309,10 +312,10 @@ btnLobbyStart.addEventListener('click', async () => {
     for (const pin of checked) {
         const data = hostRoomsData[pin];
         if (!data) { skipped.push(`[${pin}] 정보 없음`); continue; }
-        if (data.status !== 'waiting' && data.status !== 'result') {
+        if (data.status !== 'waiting') {
             skipped.push(`[${pin}] 이미 진행중`); continue;
         }
-        const { updates, error } = buildRoundStartUpdates(data);
+        const { updates, error } = buildReadyUpdates(data, Date.now());
         if (error) { skipped.push(`[${pin}] ${error}`); continue; }
         try {
             await updateRoom(pin, updates);
@@ -365,12 +368,22 @@ btnBackLobby.addEventListener('click', () => {
     showScreen('screen-host-lobby');
 });
 
-// --- 라운드 시작 updates 생성 (대시보드/로비 공용) ---
-function buildRoundStartUpdates(data) {
+// 문자열 → 안정적인 정수 해시 (연기자 이탈 시 재구성 seed용)
+function hashString(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+    return Math.abs(h);
+}
+
+// --- 다음 라운드를 '준비(ready)' 상태로 구성하는 updates 생성 ---
+// seed를 기준으로 연기자/문제를 '결정론적으로' 고릅니다.
+// 같은 스냅샷 + 같은 seed면 모든 클라이언트가 동일한 결과를 계산하므로,
+// 여러 명이 동시에 써도 값이 같아(멱등) 호스트 없이도 안전하게 자동 진행됩니다.
+function buildReadyUpdates(data, seed) {
     if (!data || !data.players || Object.keys(data.players).length === 0) {
         return { error: '참가자가 없습니다.' };
     }
-    const players = Object.keys(data.players);
+    const players = Object.keys(data.players).sort(); // 정렬로 순서 고정 → 결정론 보장
     if (players.length < 2) return { error: '최소 2명이 필요합니다.' };
 
     const emotions = data.cards?.emotions || [];
@@ -392,19 +405,21 @@ function buildRoundStartUpdates(data) {
     let unactedPlayers = players.filter(uid => !data.players[uid].acted);
     if (unactedPlayers.length === 0) {
         players.forEach(uid => (updates[`players/${uid}/acted`] = false));
-        unactedPlayers = players;
+        unactedPlayers = players; // 이미 정렬됨
     }
-    const actorId = unactedPlayers[Math.floor(Math.random() * unactedPlayers.length)];
+
+    const s = Math.abs(Math.floor(seed || 0));
+    const actorId = unactedPlayers[s % unactedPlayers.length];
     updates[`players/${actorId}/acted`] = true;
 
-    const targetEmotion = emotions[Math.floor(Math.random() * emotions.length)];
-    const targetSituation = situations[Math.floor(Math.random() * situations.length)];
+    const targetEmotion = emotions[s % emotions.length];
+    const targetSituation = situations[(s + 7) % situations.length];
 
     updates['currentRound'] = {
         actorId, targetEmotion, targetSituation,
-        startTime: Date.now(), guessStartTime: 0, isVoided: false, nextRoundTime: null
+        startTime: null, guessStartTime: 0, isVoided: false, nextRoundTime: null
     };
-    updates['status'] = 'acting';
+    updates['status'] = 'ready';
     return { updates };
 }
 
@@ -439,19 +454,34 @@ function runDistributedChecks(data) {
             calculateScores(data);
         }
     } else if (data.status === 'result' && data.currentRound && data.currentRound.nextRoundTime) {
-        // 호스트만 자동 시작하며, nextRoundTime당 한 번만 실행
-        if (now > data.currentRound.nextRoundTime + 500 && isHost && !isStartingRound
+        // 결과 카운트다운 종료 → 다음 라운드 '준비(ready)' 상태로 자동 전환.
+        // 결정론적 계산이라 접속한 모든 클라이언트가 실행해도 결과가 동일(멱등).
+        if (now > data.currentRound.nextRoundTime + 500 && !isStartingRound
             && autoStartedKey !== data.currentRound.nextRoundTime) {
             autoStartedKey = data.currentRound.nextRoundTime;
-            triggerNextRound();
+            transitionToReady(data, data.currentRound.startTime);
+        }
+    } else if (data.status === 'ready' && data.currentRound) {
+        // 안전장치: 준비 상태에서 연기자가 나가버리면(강퇴/이탈) 다른 사람으로 재구성
+        const actorId = data.currentRound.actorId;
+        if (!data.players || !data.players[actorId]) {
+            const rebuildKey = 'rebuild_' + actorId;
+            if (!isStartingRound && autoStartedKey !== rebuildKey) {
+                autoStartedKey = rebuildKey;
+                transitionToReady(data); // seed 미지정 → 참가자 목록 해시로 결정론 계산
+            }
         }
     }
 }
 
-async function triggerNextRound() {
+// 다음 라운드를 ready 상태로 전환. seed가 없으면 참가자 uid 목록 해시를 사용(결정론).
+async function transitionToReady(data, seed) {
     isStartingRound = true;
     try {
-        const { updates, error } = buildRoundStartUpdates(roomData);
+        const effectiveSeed = (seed != null)
+            ? seed
+            : hashString(Object.keys(data.players || {}).sort().join(','));
+        const { updates, error } = buildReadyUpdates(data, effectiveSeed);
         if (!error) await updateRoom(currentPin, updates);
     } finally {
         isStartingRound = false;
@@ -505,7 +535,8 @@ function handleHostUpdate(data) {
         settingCardCount.value = data.settings.cardCount;
     }
 
-    btnHostStart.disabled = data.status !== 'waiting' && data.status !== 'result';
+    // 첫 시작만 호스트가 누르고, 이후 라운드는 자동 진행되므로 대기 상태에서만 활성화
+    btnHostStart.disabled = data.status !== 'waiting';
 
     renderHostCards(data.cards);
 }
@@ -589,7 +620,7 @@ btnSaveSettings.addEventListener('click', async () => {
 });
 
 btnHostStart.addEventListener('click', async () => {
-    const { updates, error } = buildRoundStartUpdates(roomData);
+    const { updates, error } = buildReadyUpdates(roomData, Date.now());
     if (error) return alert(error);
     await updateRoom(currentPin, updates);
 });
@@ -750,6 +781,17 @@ function handlePlayerUpdate(data) {
         showScreen('screen-waiting');
         elWaitingMsg.innerText = "선생님이 게임을 시작할 때까지 기다려주세요!";
     }
+    else if (data.status === 'ready') {
+        showScreen('screen-ready');
+        if (amActor) {
+            readyActorBlock.style.display = 'flex';
+            readyGuesserBlock.style.display = 'none';
+            btnReadyStart.classList.remove('disabled');
+        } else {
+            readyActorBlock.style.display = 'none';
+            readyGuesserBlock.style.display = 'flex';
+        }
+    }
     else if (data.status === 'acting') {
         if (amActor) {
             showScreen('screen-actor');
@@ -808,6 +850,14 @@ function handlePlayerUpdate(data) {
 
     lastStatus = data.status;
 }
+
+// 연기자가 '준비완료'를 누르면 실제 라운드(acting) 시작
+btnReadyStart.addEventListener('click', async () => {
+    if (!roomData || roomData.status !== 'ready') return;
+    if (roomData.currentRound?.actorId !== currentUid) return;
+    btnReadyStart.classList.add('disabled');
+    await updateRoom(currentPin, { status: 'acting', 'currentRound/startTime': Date.now() });
+});
 
 btnActorDone.addEventListener('click', async () => {
     if (!roomData || roomData.status !== 'acting') return;
