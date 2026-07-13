@@ -1,7 +1,7 @@
 import { db } from './firebase.js';
 import { ref, set, get, update, onValue, serverTimestamp, remove } from "firebase/database";
 
-export const createRoom = async (hostId) => {
+export const createRoom = async (hostId, title) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     const roomRef = ref(db, `rooms/${pin}`);
     
@@ -12,11 +12,12 @@ export const createRoom = async (hostId) => {
     ]);
 
     if (snapshot.exists()) {
-        return createRoom(hostId); // Retry if PIN collision
+        return createRoom(hostId, title); // Retry if PIN collision
     }
 
     await set(roomRef, {
         hostId,
+        title: title || '새로운 게임 방',
         status: 'waiting', // waiting, acting, guessing, result
         settings: {
             watchTime: 30,
@@ -105,5 +106,40 @@ export const submitGuess = async (pin, uid, guess1, guess2, guessTime) => {
         guess1,
         guess2,
         guessTime
+    });
+};
+
+export const saveDeck = async (hostId, deckName, cards) => {
+    const deckId = `deck_${Date.now()}`;
+    const deckRef = ref(db, `decks/${hostId}/${deckId}`);
+    await set(deckRef, {
+        name: deckName,
+        emotions: cards.emotions || [],
+        situations: cards.situations || [],
+        createdAt: serverTimestamp()
+    });
+};
+
+export const listenDecks = (hostId, callback) => {
+    const decksRef = ref(db, `decks/${hostId}`);
+    return onValue(decksRef, (snapshot) => {
+        callback(snapshot.val() || {});
+    });
+};
+
+export const listenHostRooms = (hostId, callback) => {
+    const roomsRef = ref(db, `rooms`);
+    // Ideally we should use query and orderByChild('hostId'), but for simplicity and lack of index, 
+    // we can listen to all rooms and filter locally, or use proper Firebase queries.
+    // Let's use basic filtering for now since the app scale is small.
+    return onValue(roomsRef, (snapshot) => {
+        const allRooms = snapshot.val() || {};
+        const myRooms = {};
+        Object.keys(allRooms).forEach(pin => {
+            if (allRooms[pin].hostId === hostId) {
+                myRooms[pin] = allRooms[pin];
+            }
+        });
+        callback(myRooms);
     });
 };

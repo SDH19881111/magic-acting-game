@@ -1,5 +1,5 @@
 import './style.css';
-import { createRoom, joinRoom, listenRoom, updateRoom, updatePlayer, submitGuess } from './db.js';
+import { createRoom, joinRoom, listenRoom, updateRoom, updatePlayer, submitGuess, saveDeck, listenDecks, listenHostRooms } from './db.js';
 
 // --- DOM Elements ---
 const screens = document.querySelectorAll('.screen');
@@ -12,9 +12,15 @@ function showScreen(id) {
 const inputPin = document.getElementById('join-pin');
 const inputNickname = document.getElementById('join-nickname');
 const btnJoin = document.getElementById('btn-join');
+const btnEnterHost = document.getElementById('btn-enter-host');
+
+// Host Lobby
+const elNewRoomTitle = document.getElementById('new-room-title');
 const btnCreateRoom = document.getElementById('btn-create-room');
+const elHostRoomList = document.getElementById('host-room-list');
 
 // Host Dashboard
+const elHostRoomTitle = document.getElementById('host-room-title');
 const elHostPin = document.getElementById('host-pin');
 const elHostPlayerCount = document.getElementById('host-player-count');
 const elHostPlayerList = document.getElementById('host-player-list');
@@ -24,32 +30,36 @@ const settingWatchTime = document.getElementById('setting-watch-time');
 const settingGuessTime = document.getElementById('setting-guess-time');
 const settingCardCount = document.getElementById('setting-card-count');
 const btnSaveSettings = document.getElementById('btn-save-settings');
+const btnBackLobby = document.getElementById('btn-back-lobby');
 
-// Waiting
+// Card Manager
+const inputEmotion = document.getElementById('input-emotion');
+const btnAddEmotion = document.getElementById('btn-add-emotion');
+const listEmotions = document.getElementById('list-emotions');
+const inputSituation = document.getElementById('input-situation');
+const btnAddSituation = document.getElementById('btn-add-situation');
+const listSituations = document.getElementById('list-situations');
+
+const deckSelector = document.getElementById('deck-selector');
+const btnLoadDeck = document.getElementById('btn-load-deck');
+const inputDeckName = document.getElementById('input-deck-name');
+const btnSaveDeck = document.getElementById('btn-save-deck');
+
+// Waiting / Actor / Blind / Guess / Sync / Result (Omitted DOM queries for brevity, assuming existing references below work)
 const elMyNickname = document.getElementById('my-nickname');
 const elMyScore = document.getElementById('my-score');
 const elWaitingMsg = document.getElementById('waiting-msg');
-
-// Actor
 const elActorEmotion = document.getElementById('actor-emotion');
 const elActorSituation = document.getElementById('actor-situation');
 const btnActorDone = document.getElementById('btn-actor-done');
 const elActorTimer = document.getElementById('actor-timer');
-
-// Blind
 const elBlindTimer = document.getElementById('blind-timer');
-
-// Guess
 const elGuess1Cards = document.getElementById('guess1-cards');
 const elGuess2Cards = document.getElementById('guess2-cards');
 const elGuess1Timer = document.getElementById('guess1-timer');
 const elGuess2Timer = document.getElementById('guess2-timer');
-
-// Sync
 const screenSync = document.getElementById('screen-sync');
 const elSyncText = document.getElementById('sync-text');
-
-// Result
 const elResultEmotion = document.getElementById('result-emotion');
 const elResultSituation = document.getElementById('result-situation');
 const elResultList = document.getElementById('result-list');
@@ -58,12 +68,15 @@ const elResultNextMsg = document.getElementById('result-next-msg');
 
 // --- State ---
 let isHost = false;
+let myHostId = null;
 let currentPin = null;
 let currentUid = null;
 let roomData = null;
+let myDecks = {};
 
 let localTimerInterval = null;
-let syncTimeout = null;
+let hostTimerInterval = null;
+let roomListenerUnsubscribe = null;
 
 let myGuess1 = null;
 let myGuess2 = null;
@@ -74,103 +87,78 @@ window.addEventListener('DOMContentLoaded', () => {
     if (lastNick) inputNickname.value = lastNick;
 });
 
-// --- Host Functions ---
+// --- Host Lobby Functions ---
+btnEnterHost.addEventListener('click', () => {
+    myHostId = localStorage.getItem('myHostId');
+    if (!myHostId) {
+        myHostId = `host_${Date.now()}`;
+        localStorage.setItem('myHostId', myHostId);
+    }
+    isHost = true;
+    showScreen('screen-host-lobby');
+    
+    listenHostRooms(myHostId, (rooms) => {
+        elHostRoomList.innerHTML = '';
+        Object.keys(rooms).forEach(pin => {
+            const r = rooms[pin];
+            const li = document.createElement('li');
+            li.style.cursor = 'pointer';
+            li.innerHTML = `<div><strong>[${pin}]</strong> ${r.title} <br><small>접속자: ${r.players ? Object.keys(r.players).length : 0}명</small></div>
+            <button class="btn-primary" style="padding:5px 10px; font-size:1rem;">관리하기</button>`;
+            li.onclick = () => enterHostRoom(pin);
+            elHostRoomList.appendChild(li);
+        });
+    });
+
+    listenDecks(myHostId, (decks) => {
+        myDecks = decks;
+        deckSelector.innerHTML = '<option value="">덱 선택 안함</option>';
+        Object.keys(decks).forEach(id => {
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.innerText = decks[id].name;
+            deckSelector.appendChild(opt);
+        });
+    });
+});
+
 btnCreateRoom.addEventListener('click', async () => {
+    const title = elNewRoomTitle.value.trim();
+    if(!title) return alert('방 제목을 입력하세요.');
     btnCreateRoom.disabled = true;
     try {
-        const hostId = `host_${Date.now()}`;
-        currentPin = await createRoom(hostId);
-        isHost = true;
-        elHostPin.innerText = currentPin;
-        showScreen('screen-host');
-        listenRoom(currentPin, handleHostUpdate);
+        await createRoom(myHostId, title);
+        elNewRoomTitle.value = '';
     } catch (e) {
         alert(e.message);
+    } finally {
         btnCreateRoom.disabled = false;
     }
 });
 
-btnSaveSettings.addEventListener('click', async () => {
-    if (!isHost) return;
-    await updateRoom(currentPin, {
-        settings: {
-            watchTime: parseInt(settingWatchTime.value) || 30,
-            guessTime: parseInt(settingGuessTime.value) || 15,
-            cardCount: parseInt(settingCardCount.value) || 6
-        }
-    });
-    alert('설정이 저장되었습니다.');
+function enterHostRoom(pin) {
+    currentPin = pin;
+    if (roomListenerUnsubscribe) roomListenerUnsubscribe(); // Unsubscribe prev room
+    roomListenerUnsubscribe = listenRoom(currentPin, handleHostUpdate);
+    showScreen('screen-host');
+}
+
+btnBackLobby.addEventListener('click', () => {
+    if (roomListenerUnsubscribe) roomListenerUnsubscribe();
+    roomListenerUnsubscribe = null;
+    currentPin = null;
+    clearInterval(hostTimerInterval);
+    showScreen('screen-host-lobby');
 });
 
-btnHostStart.addEventListener('click', async () => {
-    if (!roomData || !roomData.players) return alert('참가자가 없습니다.');
-    const players = Object.keys(roomData.players);
-    if (players.length < 2) return alert('최소 2명의 참가자가 필요합니다. (연기자 1, 정답자 1)');
-
-    // Reset all 'hasGuessed' for the new round
-    const updates = {};
-    players.forEach(uid => {
-        updates[`players/${uid}/hasGuessed`] = false;
-        updates[`players/${uid}/guess1`] = null;
-        updates[`players/${uid}/guess2`] = null;
-        updates[`players/${uid}/guessTime`] = null;
-    });
-
-    // Select Actor
-    let unactedPlayers = players.filter(uid => !roomData.players[uid].acted);
-    if (unactedPlayers.length === 0) {
-        // Everyone acted, reset
-        players.forEach(uid => {
-            updates[`players/${uid}/acted`] = false;
-        });
-        unactedPlayers = players;
-    }
-    const actorId = unactedPlayers[Math.floor(Math.random() * unactedPlayers.length)];
-    updates[`players/${actorId}/acted`] = true;
-
-    // Select Target
-    const emotions = roomData.cards.emotions;
-    const situations = roomData.cards.situations;
-    const targetEmotion = emotions[Math.floor(Math.random() * emotions.length)];
-    const targetSituation = situations[Math.floor(Math.random() * situations.length)];
-
-    updates['currentRound'] = {
-        actorId,
-        targetEmotion,
-        targetSituation,
-        startTime: Date.now(),
-        guessStartTime: 0, // Will be set later
-        isVoided: false
-    };
-    updates['status'] = 'acting';
-
-    await updateRoom(currentPin, updates);
-});
-
-btnHostVoid.addEventListener('click', async () => {
-    if (!isHost || roomData?.status !== 'result') {
-        if(confirm('진행중인 게임을 무효화하고 대기실로 돌아갈까요?')) {
-            await updateRoom(currentPin, { status: 'waiting', 'currentRound/isVoided': true });
-        }
-        return;
-    }
-    if (confirm('이 라운드의 점수를 무효화하시겠습니까?')) {
-        await updateRoom(currentPin, { 'currentRound/isVoided': true });
-        alert('무효 처리되었습니다.');
-        // Host might need to recalculate or revert scores. 
-        // For simplicity, we can just say "isVoided" flag will prevent score addition if done before result,
-        // but if we are already in result, we should revert.
-        // It's easier to only allow voiding BEFORE or DURING result, and handle score logic carefully.
-    }
-});
-
-let hostTimerInterval = null;
-
+// --- Host Dashboard Functions ---
 function handleHostUpdate(data) {
     if (!data) return;
     roomData = data;
     
-    // Update dashboard UI
+    elHostRoomTitle.innerText = `👑 ${data.title}`;
+    elHostPin.innerText = currentPin;
+    
     const players = data.players || {};
     elHostPlayerCount.innerText = Object.keys(players).length;
     elHostPlayerList.innerHTML = '';
@@ -191,59 +179,171 @@ function handleHostUpdate(data) {
 
     btnHostStart.disabled = data.status !== 'waiting' && data.status !== 'result';
 
+    // Render Cards
+    renderHostCards(data.cards);
+
     // Host authoritative logic
     clearInterval(hostTimerInterval);
     const now = Date.now();
 
     if (data.status === 'acting' && data.currentRound) {
-        // Check watch timer
         const elapsed = (now - data.currentRound.startTime) / 1000;
-        const watchTime = data.settings.watchTime;
-        if (elapsed > watchTime) {
-            // Time's up -> guessing
-            updateRoom(currentPin, { 
-                status: 'guessing', 
-                'currentRound/guessStartTime': Date.now() + 1500 // 1.5s delay for sync animation
-            });
+        if (elapsed > data.settings.watchTime) {
+            updateRoom(currentPin, { status: 'guessing', 'currentRound/guessStartTime': Date.now() + 1500 });
         } else {
-            hostTimerInterval = setInterval(() => handleHostUpdate(data), 1000); // Polling for timeout
+            hostTimerInterval = setInterval(() => handleHostUpdate(data), 1000);
         }
     } else if (data.status === 'guessing' && data.currentRound) {
-        // Check if everyone guessed or time's up
-        const guessTime = data.settings.guessTime;
         const elapsed = (now - data.currentRound.guessStartTime) / 1000;
-        
         let allGuessed = true;
         Object.keys(players).forEach(uid => {
             if (uid !== data.currentRound.actorId && !players[uid].hasGuessed) {
-                // Not guessed yet. But wait, what if they joined mid-round? 
-                // Mid-round joiners shouldn't block. We skip them if joinTime > round start time.
-                if (players[uid].joinTime < data.currentRound.startTime) {
-                    allGuessed = false;
-                }
+                if (players[uid].joinTime < data.currentRound.startTime) allGuessed = false;
             }
         });
 
-        if (elapsed > guessTime || allGuessed) {
-            // Goto Result & Calculate Scores
+        if (elapsed > data.settings.guessTime || allGuessed) {
             calculateScores(data);
         } else {
             hostTimerInterval = setInterval(() => handleHostUpdate(data), 1000);
         }
-    } else if (data.status === 'result' && data.currentRound && !data.currentRound.nextRoundTime) {
-        // Start 10s countdown to next round
-        const nextTime = Date.now() + 10000;
-        updateRoom(currentPin, { 'currentRound/nextRoundTime': nextTime });
-    } else if (data.status === 'result' && data.currentRound && data.currentRound.nextRoundTime) {
-        const nextTime = data.currentRound.nextRoundTime;
-        if (now >= nextTime) {
-            // Trigger next round automatically via the same logic as start
+    } else if (data.status === 'result' && data.currentRound) {
+        if (!data.currentRound.nextRoundTime) {
+            updateRoom(currentPin, { 'currentRound/nextRoundTime': Date.now() + 10000 });
+        } else if (now >= data.currentRound.nextRoundTime) {
             btnHostStart.click();
         } else {
             hostTimerInterval = setInterval(() => handleHostUpdate(data), 1000);
         }
     }
 }
+
+// --- Card Management ---
+function renderHostCards(cards) {
+    if (!cards) return;
+    listEmotions.innerHTML = '';
+    (cards.emotions || []).forEach((w, idx) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${w}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="emotions">X</button>`;
+        listEmotions.appendChild(li);
+    });
+    listSituations.innerHTML = '';
+    (cards.situations || []).forEach((w, idx) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span>${w}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="situations">X</button>`;
+        listSituations.appendChild(li);
+    });
+
+    document.querySelectorAll('.btn-delete-word').forEach(btn => {
+        btn.onclick = async (e) => {
+            const type = e.target.dataset.type;
+            const idx = parseInt(e.target.dataset.idx);
+            let arr = [...roomData.cards[type]];
+            arr.splice(idx, 1);
+            await updateRoom(currentPin, { [`cards/${type}`]: arr });
+        };
+    });
+}
+
+btnAddEmotion.addEventListener('click', async () => {
+    const w = inputEmotion.value.trim();
+    if(w) {
+        let arr = [...(roomData.cards.emotions || []), w];
+        await updateRoom(currentPin, { 'cards/emotions': arr });
+        inputEmotion.value = '';
+    }
+});
+
+btnAddSituation.addEventListener('click', async () => {
+    const w = inputSituation.value.trim();
+    if(w) {
+        let arr = [...(roomData.cards.situations || []), w];
+        await updateRoom(currentPin, { 'cards/situations': arr });
+        inputSituation.value = '';
+    }
+});
+
+btnSaveDeck.addEventListener('click', async () => {
+    const name = inputDeckName.value.trim();
+    if(!name) return alert('덱 이름을 입력하세요.');
+    await saveDeck(myHostId, name, roomData.cards);
+    inputDeckName.value = '';
+    alert('저장되었습니다!');
+});
+
+btnLoadDeck.addEventListener('click', async () => {
+    const deckId = deckSelector.value;
+    if(!deckId) return alert('불러올 덱을 선택하세요.');
+    const deck = myDecks[deckId];
+    if(deck) {
+        await updateRoom(currentPin, {
+            'cards/emotions': deck.emotions || [],
+            'cards/situations': deck.situations || []
+        });
+        alert('덱을 성공적으로 불러왔습니다!');
+    }
+});
+
+btnSaveSettings.addEventListener('click', async () => {
+    if (!isHost) return;
+    await updateRoom(currentPin, {
+        settings: {
+            watchTime: parseInt(settingWatchTime.value) || 30,
+            guessTime: parseInt(settingGuessTime.value) || 15,
+            cardCount: parseInt(settingCardCount.value) || 6
+        }
+    });
+    alert('설정이 저장되었습니다.');
+});
+
+btnHostStart.addEventListener('click', async () => {
+    if (!roomData || !roomData.players) return alert('참가자가 없습니다.');
+    const players = Object.keys(roomData.players);
+    if (players.length < 2) return alert('최소 2명의 참가자가 필요합니다. (연기자 1, 정답자 1)');
+
+    const emotions = roomData.cards.emotions || [];
+    const situations = roomData.cards.situations || [];
+    if(emotions.length < 2 || situations.length < 2) return alert('감정과 상황 카드가 최소 2개 이상 필요합니다.');
+
+    const updates = {};
+    players.forEach(uid => {
+        updates[`players/${uid}/hasGuessed`] = false;
+        updates[`players/${uid}/guess1`] = null;
+        updates[`players/${uid}/guess2`] = null;
+        updates[`players/${uid}/guessTime`] = null;
+    });
+
+    let unactedPlayers = players.filter(uid => !roomData.players[uid].acted);
+    if (unactedPlayers.length === 0) {
+        players.forEach(uid => updates[`players/${uid}/acted`] = false);
+        unactedPlayers = players;
+    }
+    const actorId = unactedPlayers[Math.floor(Math.random() * unactedPlayers.length)];
+    updates[`players/${actorId}/acted`] = true;
+
+    const targetEmotion = emotions[Math.floor(Math.random() * emotions.length)];
+    const targetSituation = situations[Math.floor(Math.random() * situations.length)];
+
+    updates['currentRound'] = {
+        actorId, targetEmotion, targetSituation,
+        startTime: Date.now(), guessStartTime: 0, isVoided: false
+    };
+    updates['status'] = 'acting';
+    await updateRoom(currentPin, updates);
+});
+
+btnHostVoid.addEventListener('click', async () => {
+    if (!isHost || roomData?.status !== 'result') {
+        if(confirm('진행중인 게임을 무효화하고 대기실로 돌아갈까요?')) {
+            await updateRoom(currentPin, { status: 'waiting', 'currentRound/isVoided': true });
+        }
+        return;
+    }
+    if (confirm('이 라운드의 점수를 무효화하시겠습니까?')) {
+        await updateRoom(currentPin, { 'currentRound/isVoided': true });
+        alert('무효 처리되었습니다.');
+    }
+});
 
 async function calculateScores(data) {
     if (data.currentRound.isVoided) {
@@ -254,7 +354,6 @@ async function calculateScores(data) {
     const { actorId, targetEmotion, targetSituation, startTime } = data.currentRound;
     const players = data.players || {};
     
-    // Evaluate guesses
     let correctGuessers = [];
     let wrongGuessers = [];
     let timeoutGuessers = [];
@@ -262,31 +361,21 @@ async function calculateScores(data) {
     Object.keys(players).forEach(uid => {
         if (uid === actorId) return;
         const p = players[uid];
-        // Ignore mid-round joins
         if (p.joinTime > startTime) return;
 
-        if (!p.hasGuessed) {
-            timeoutGuessers.push(uid);
-        } else if (p.guess1 === targetEmotion && p.guess2 === targetSituation) {
-            correctGuessers.push({ uid, guessTime: p.guessTime });
-        } else {
-            wrongGuessers.push(uid);
-        }
+        if (!p.hasGuessed) timeoutGuessers.push(uid);
+        else if (p.guess1 === targetEmotion && p.guess2 === targetSituation) correctGuessers.push({ uid, guessTime: p.guessTime });
+        else wrongGuessers.push(uid);
     });
 
-    // Sort correct guessers by time
     correctGuessers.sort((a, b) => a.guessTime - b.guessTime);
-
     const updates = {};
     
-    let actorBonus = correctGuessers.length * 5;
-    let actorTotal = 10 + actorBonus;
+    let actorTotal = 10 + (correctGuessers.length * 5);
     updates[`players/${actorId}/score`] = (players[actorId].score || 0) + actorTotal;
 
     correctGuessers.forEach((g, index) => {
-        let pts = 10;
-        if (index === 0) pts = 30;
-        else if (index === 1) pts = 20;
+        let pts = index === 0 ? 30 : index === 1 ? 20 : 10;
         updates[`players/${g.uid}/score`] = (players[g.uid].score || 0) + pts;
     });
 
@@ -294,10 +383,7 @@ async function calculateScores(data) {
         updates[`players/${uid}/score`] = (players[uid].score || 0) - 5;
         updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
     });
-
-    timeoutGuessers.forEach(uid => {
-        updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
-    });
+    timeoutGuessers.forEach(uid => updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1);
 
     updates['status'] = 'result';
     await updateRoom(currentPin, updates);
@@ -332,13 +418,12 @@ function handlePlayerUpdate(data) {
     roomData = data;
     
     const me = data.players[currentUid];
-    if (!me) return; // Kicked?
+    if (!me) return; 
 
     elMyScore.innerText = me.score;
     const amActor = data.currentRound?.actorId === currentUid;
     const joinedMidRound = me.joinTime > data.currentRound?.startTime;
 
-    // Status transitions
     if (data.status === 'waiting') {
         showScreen('screen-waiting');
         elWaitingMsg.innerText = "선생님이 게임을 시작할 때까지 기다려주세요!";
@@ -355,10 +440,7 @@ function handlePlayerUpdate(data) {
         }
     } 
     else if (data.status === 'guessing') {
-        if (lastStatus === 'acting') {
-            // Trigger Sync
-            showSyncPopup();
-        }
+        if (lastStatus === 'acting') showSyncPopup();
         
         if (amActor) {
             showScreen('screen-waiting');
@@ -381,7 +463,6 @@ function handlePlayerUpdate(data) {
         elResultEmotion.innerText = data.currentRound.targetEmotion;
         elResultSituation.innerText = data.currentRound.targetSituation;
         
-        // Render Scoreboard
         elResultList.innerHTML = '';
         const sorted = Object.values(data.players).sort((a,b) => b.score - a.score);
         sorted.forEach((p, idx) => {
@@ -402,52 +483,41 @@ function handlePlayerUpdate(data) {
     lastStatus = data.status;
 }
 
-// Actor Done button
 btnActorDone.addEventListener('click', async () => {
     if (!roomData || roomData.status !== 'acting') return;
     btnActorDone.disabled = true;
-    await updateRoom(currentPin, { 
-        status: 'guessing',
-        'currentRound/guessStartTime': Date.now() + 1500
-    });
+    await updateRoom(currentPin, { status: 'guessing', 'currentRound/guessStartTime': Date.now() + 1500 });
     setTimeout(() => { btnActorDone.disabled = false; }, 2000);
 });
 
 // Timers
-function updateActorTimer(startTime, watchTime) {
+function updateActorTimer(st, wt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(watchTime - (Date.now() - startTime)/1000);
-        if (left < 0) left = 0;
-        elActorTimer.innerText = left;
+        let left = Math.ceil(wt - (Date.now() - st)/1000);
+        elActorTimer.innerText = Math.max(0, left);
     }, 200);
 }
-
-function updateBlindTimer(startTime, watchTime) {
+function updateBlindTimer(st, wt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(watchTime - (Date.now() - startTime)/1000);
-        if (left < 0) left = 0;
-        elBlindTimer.innerText = left;
+        let left = Math.ceil(wt - (Date.now() - st)/1000);
+        elBlindTimer.innerText = Math.max(0, left);
     }, 200);
 }
-
-function updateGuessTimer(guessStartTime, guessTime) {
+function updateGuessTimer(st, gt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(guessTime - (Date.now() - guessStartTime)/1000);
-        if (left < 0) left = 0;
-        elGuess1Timer.innerText = left;
-        elGuess2Timer.innerText = left;
+        let left = Math.ceil(gt - (Date.now() - st)/1000);
+        elGuess1Timer.innerText = Math.max(0, left);
+        elGuess2Timer.innerText = Math.max(0, left);
     }, 200);
 }
-
-function updateResultTimer(nextRoundTime) {
+function updateResultTimer(nt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil((nextRoundTime - Date.now())/1000);
-        if (left < 0) left = 0;
-        elResultTimer.innerText = left;
+        let left = Math.ceil((nt - Date.now())/1000);
+        elResultTimer.innerText = Math.max(0, left);
     }, 200);
 }
 
@@ -462,7 +532,7 @@ function showSyncPopup() {
         if (count > 0) {
             elSyncText.innerText = count;
             elSyncText.classList.remove('zoom-in');
-            void elSyncText.offsetWidth; // trigger reflow
+            void elSyncText.offsetWidth;
             elSyncText.classList.add('zoom-in');
         } else if (count === 0) {
             elSyncText.innerText = "시작!";
@@ -470,7 +540,7 @@ function showSyncPopup() {
             clearInterval(intv);
             screenSync.classList.add('hidden');
         }
-    }, 400); // Fast countdown, 1.5s total approx
+    }, 400);
 }
 
 // Guess Cards Rendering
@@ -511,7 +581,7 @@ function renderGuessCards(phase) {
             div.onclick = async () => {
                 myGuess2 = text;
                 div.classList.add('selected');
-                elGuess2Cards.style.pointerEvents = 'none'; // Prevent double click
+                elGuess2Cards.style.pointerEvents = 'none';
                 await submitGuess(currentPin, currentUid, myGuess1, myGuess2, Date.now() - r.guessStartTime);
                 elGuess2Cards.style.pointerEvents = 'auto';
                 showScreen('screen-waiting');

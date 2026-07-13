@@ -22,7 +22,27 @@
                 </div>
                 
                 <div class="host-section">
-                    <button id="btn-create-room" class="btn-text">선생님(호스트) 방 만들기</button>
+                    <button id="btn-enter-host" class="btn-text">선생님(호스트) 로그인</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Screen: Host Lobby (New) -->
+        <div id="screen-host-lobby" class="screen">
+            <header class="host-header box-glass">
+                <h2>👑 호스트 로비</h2>
+                <div class="host-info">내 방 목록 관리</div>
+            </header>
+            
+            <div class="dashboard-grid">
+                <div class="panel box-glass">
+                    <h3>새 방 만들기</h3>
+                    <input type="text" id="new-room-title" placeholder="방 제목 (예: 3학년 2반)" maxlength="20">
+                    <button id="btn-create-room" class="btn-primary">방 생성하기</button>
+                </div>
+                <div class="panel box-glass" style="grid-column: span 1;">
+                    <h3>내 방 목록</h3>
+                    <ul id="host-room-list" class="player-list"></ul>
                 </div>
             </div>
         </div>
@@ -30,11 +50,49 @@
         <!-- Screen: Host Dashboard -->
         <div id="screen-host" class="screen">
             <header class="host-header box-glass">
-                <h2>👑 호스트 대시보드</h2>
-                <div class="pin-display">방 접속 코드: <span id="host-pin" class="highlight">---</span></div>
+                <div>
+                    <h2 id="host-room-title">👑 호스트 대시보드</h2>
+                    <button id="btn-back-lobby" class="btn-text" style="padding: 0; margin: 0; font-size: 1rem;">로비로 돌아가기</button>
+                </div>
+                <div class="pin-display">접속 코드: <span id="host-pin" class="highlight">---</span></div>
             </header>
             
             <div class="dashboard-grid">
+                <div class="panel box-glass">
+                    <h3>단어장 (카드) 관리</h3>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <select id="deck-selector" style="font-family:'Jua'; padding:5px; border-radius:5px; width:60%;">
+                            <option value="">덱 선택 안함</option>
+                        </select>
+                        <button id="btn-load-deck" class="btn-secondary" style="padding:5px 10px; font-size:1rem;">불러오기</button>
+                    </div>
+
+                    <div class="word-manager">
+                        <div class="word-col">
+                            <h4 style="color:#60A5FA;">감정 카드</h4>
+                            <div class="word-input-group">
+                                <input type="text" id="input-emotion" placeholder="감정 단어" style="margin-bottom:5px;">
+                                <button id="btn-add-emotion" class="btn-secondary" style="padding:5px;">추가</button>
+                            </div>
+                            <ul id="list-emotions" class="word-list"></ul>
+                        </div>
+                        <div class="word-col">
+                            <h4 style="color:#FCA5A5;">상황 카드</h4>
+                            <div class="word-input-group">
+                                <input type="text" id="input-situation" placeholder="상황 단어" style="margin-bottom:5px;">
+                                <button id="btn-add-situation" class="btn-danger" style="padding:5px;">추가</button>
+                            </div>
+                            <ul id="list-situations" class="word-list"></ul>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 15px; border-top: 1px solid rgba(255,255,255,0.2); padding-top: 10px;">
+                        <input type="text" id="input-deck-name" placeholder="저장할 덱 이름" style="width: 60%; margin-bottom:0;">
+                        <button id="btn-save-deck" class="btn-primary" style="padding:5px 10px; font-size:1rem;">현재 단어장 덱으로 저장</button>
+                    </div>
+                </div>
+
                 <div class="panel box-glass">
                     <h3>게임 설정</h3>
                     <div class="setting-group">
