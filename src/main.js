@@ -1,5 +1,36 @@
 import './style.css';
-import { createRoom, joinRoom, listenRoom, updateRoom, updatePlayer, submitGuess, saveDeck, listenDecks, listenHostRooms, removeRoom, finishRoom } from './db.js';
+import {
+    createRoom, joinRoom, listenRoom, updateRoom, submitGuess,
+    saveDeck, listenDecks, listenHostRooms, removeRoom, finishRoom,
+    loginOrRegisterHost, kickPlayer, duplicateRoom
+} from './db.js';
+
+// --- Helpers ---
+// HTML 이스케이프 (닉네임/카드 등 사용자 입력을 innerHTML에 넣을 때 XSS 방지)
+function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+}
+
+// 비밀번호 해시 (SHA-256, secure context 필요: https 또는 localhost)
+async function hashPassword(hostId, password) {
+    const enc = new TextEncoder().encode(`magic-acting::${hostId}::${password}`);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// 아이디(이름) → Firebase 경로에 안전한 hostId
+function hostIdFromName(name) {
+    return 'host_' + name.trim().toLowerCase().replace(/[.#$[\]/\s]+/g, '_');
+}
+
+// 시계 오차(서버 joinTime vs 호스트 Date.now startTime)를 흡수하기 위한 버퍼
+const JOIN_BUFFER = 3000;
+function joinedBeforeRound(player, round) {
+    if (!round) return true;
+    return (player.joinTime || 0) <= (round.startTime || 0) + JOIN_BUFFER;
+}
 
 // --- DOM Elements ---
 const screens = document.querySelectorAll('.screen');
@@ -14,12 +45,23 @@ const inputNickname = document.getElementById('join-nickname');
 const btnJoin = document.getElementById('btn-join');
 const btnEnterHost = document.getElementById('btn-enter-host');
 
+// Host Login Modal
+const modalHostLogin = document.getElementById('modal-host-login');
+const hostLoginId = document.getElementById('host-login-id');
+const hostLoginPw = document.getElementById('host-login-pw');
+const btnHostLoginSubmit = document.getElementById('btn-host-login-submit');
+const btnHostLoginCancel = document.getElementById('btn-host-login-cancel');
+const hostLoginError = document.getElementById('host-login-error');
+
 // Host Lobby
 const elNewRoomTitle = document.getElementById('new-room-title');
 const btnCreateRoom = document.getElementById('btn-create-room');
 const elHostRoomList = document.getElementById('host-room-list');
+const btnLobbyStart = document.getElementById('btn-lobby-start');
 const btnLobbyEnd = document.getElementById('btn-lobby-end');
 const btnLobbyDelete = document.getElementById('btn-lobby-delete');
+const chkSelectAll = document.getElementById('chk-select-all');
+const btnLogout = document.getElementById('btn-logout');
 
 // Host Dashboard
 const elHostRoomTitle = document.getElementById('host-room-title');
@@ -77,13 +119,20 @@ let currentPin = null;
 let currentUid = null;
 let roomData = null;
 let myDecks = {};
+let hostRoomsData = {};   // 로비에서 관리하는 방들의 최신 데이터
 
 let localTimerInterval = null;
-let roomListenerUnsubscribe = null;
-let checkInterval = null;
+let roomListenerUnsubscribe = null;   // 호스트 대시보드 방 리스너
+let playerRoomUnsub = null;           // 플레이어 방 리스너
+let hostRoomsUnsub = null;
+let decksUnsub = null;
 
 let myGuess1 = null;
 let myGuess2 = null;
+let wasInRoom = false;               // 플레이어가 방에 실제로 들어와 있었는지 (강퇴 감지용)
+
+let isStartingRound = false;         // 다음 라운드 시작 재진입 방지
+let autoStartedKey = null;           // 자동 시작한 nextRoundTime 기록 (중복 시작 방지)
 
 // On Load
 window.addEventListener('DOMContentLoaded', () => {
@@ -91,40 +140,62 @@ window.addEventListener('DOMContentLoaded', () => {
     if (lastNick) inputNickname.value = lastNick;
 });
 
-// --- Host Lobby Functions ---
-btnEnterHost.addEventListener('click', () => {
-    myHostId = localStorage.getItem('myHostId');
-    if (!myHostId) {
-        myHostId = `host_${Date.now()}`;
-        localStorage.setItem('myHostId', myHostId);
+// --- Host Login ---
+function openLoginModal() {
+    hostLoginError.innerText = '';
+    hostLoginPw.value = '';
+    const lastName = localStorage.getItem('lastHostName');
+    if (lastName) hostLoginId.value = lastName;
+    modalHostLogin.classList.remove('hidden');
+    hostLoginId.focus();
+}
+function closeLoginModal() {
+    modalHostLogin.classList.add('hidden');
+}
+
+btnEnterHost.addEventListener('click', openLoginModal);
+btnHostLoginCancel.addEventListener('click', closeLoginModal);
+hostLoginPw.addEventListener('keydown', (e) => { if (e.key === 'Enter') btnHostLoginSubmit.click(); });
+hostLoginId.addEventListener('keydown', (e) => { if (e.key === 'Enter') hostLoginPw.focus(); });
+
+btnHostLoginSubmit.addEventListener('click', async () => {
+    const name = hostLoginId.value.trim();
+    const pw = hostLoginPw.value;
+    if (!name) { hostLoginError.innerText = '아이디를 입력하세요.'; return; }
+    if (!pw) { hostLoginError.innerText = '비밀번호를 입력하세요.'; return; }
+
+    btnHostLoginSubmit.disabled = true;
+    hostLoginError.innerText = '';
+    try {
+        const hostId = hostIdFromName(name);
+        const passHash = await hashPassword(hostId, pw);
+        const res = await loginOrRegisterHost(hostId, passHash);
+        if (res === 'wrong') {
+            hostLoginError.innerText = '비밀번호가 올바르지 않습니다.';
+            return;
+        }
+        localStorage.setItem('lastHostName', name);
+        localStorage.setItem('myHostId', hostId);
+        closeLoginModal();
+        if (res === 'created') alert('새 계정으로 등록되었습니다. 다음부터는 이 아이디/비밀번호로 로그인하세요.');
+        startHostSession(hostId);
+    } catch (e) {
+        hostLoginError.innerText = e.message || '로그인 중 오류가 발생했습니다.';
+    } finally {
+        btnHostLoginSubmit.disabled = false;
     }
+});
+
+function startHostSession(hostId) {
+    myHostId = hostId;
     isHost = true;
     showScreen('screen-host-lobby');
-    
-    listenHostRooms(myHostId, (rooms) => {
-        elHostRoomList.innerHTML = '';
-        Object.keys(rooms).forEach(pin => {
-            const r = rooms[pin];
-            const li = document.createElement('li');
-            li.style.display = 'flex';
-            li.style.justifyContent = 'space-between';
-            li.style.alignItems = 'center';
-            li.innerHTML = `
-                <div style="display:flex; align-items:center; gap:10px;">
-                    <input type="checkbox" class="room-checkbox" value="${pin}" style="width:20px; height:20px;">
-                    <div><strong>[${pin}]</strong> ${r.title} <br><small>상태: ${r.status === 'finished' ? '종료됨' : '진행중'} | 접속자: ${r.players ? Object.keys(r.players).length : 0}명</small></div>
-                </div>
-                <button class="btn-primary btn-manage-room" data-pin="${pin}" style="padding:5px 10px; font-size:1rem;">관리하기</button>
-            `;
-            elHostRoomList.appendChild(li);
-        });
 
-        document.querySelectorAll('.btn-manage-room').forEach(btn => {
-            btn.onclick = (e) => enterHostRoom(e.target.dataset.pin);
-        });
-    });
+    if (hostRoomsUnsub) hostRoomsUnsub();
+    hostRoomsUnsub = listenHostRooms(myHostId, renderRoomList);
 
-    listenDecks(myHostId, (decks) => {
+    if (decksUnsub) decksUnsub();
+    decksUnsub = listenDecks(myHostId, (decks) => {
         myDecks = decks;
         deckSelector.innerHTML = '<option value="">덱 선택 안함</option>';
         Object.keys(decks).forEach(id => {
@@ -134,11 +205,89 @@ btnEnterHost.addEventListener('click', () => {
             deckSelector.appendChild(opt);
         });
     });
+}
+
+btnLogout?.addEventListener('click', () => {
+    if (hostRoomsUnsub) { hostRoomsUnsub(); hostRoomsUnsub = null; }
+    if (decksUnsub) { decksUnsub(); decksUnsub = null; }
+    if (roomListenerUnsubscribe) { roomListenerUnsubscribe(); roomListenerUnsubscribe = null; }
+    isHost = false;
+    myHostId = null;
+    currentPin = null;
+    roomData = null;
+    hostRoomsData = {};
+    showScreen('screen-landing');
+});
+
+// --- Host Lobby: 방 목록 렌더링 ---
+const STATUS_LABEL = {
+    waiting: '대기중', acting: '진행중', guessing: '진행중',
+    result: '결과 발표', finished: '종료됨', calculating_final: '종료 처리중'
+};
+
+function renderRoomList(rooms) {
+    hostRoomsData = rooms;
+    if (chkSelectAll) chkSelectAll.checked = false;
+    elHostRoomList.innerHTML = '';
+
+    const pins = Object.keys(rooms);
+    if (pins.length === 0) {
+        elHostRoomList.innerHTML = '<li style="opacity:0.7; justify-content:center;">아직 만든 방이 없습니다.</li>';
+        return;
+    }
+
+    pins.forEach(pin => {
+        const r = rooms[pin];
+        const li = document.createElement('li');
+        li.style.display = 'flex';
+        li.style.justifyContent = 'space-between';
+        li.style.alignItems = 'center';
+        const count = r.players ? Object.keys(r.players).length : 0;
+        const statusLabel = STATUS_LABEL[r.status] || r.status;
+        li.innerHTML = `
+            <div style="display:flex; align-items:center; gap:10px;">
+                <input type="checkbox" class="room-checkbox" value="${pin}" style="width:20px; height:20px;">
+                <div><strong>[${pin}]</strong> ${escapeHtml(r.title)} <br><small>상태: ${statusLabel} | 접속자: ${count}명</small></div>
+            </div>
+            <div class="room-actions">
+                <button class="btn-secondary btn-dup-room" data-pin="${pin}" title="같은 덱으로 새 방 만들기">복제</button>
+                <button class="btn-primary btn-manage-room" data-pin="${pin}">관리</button>
+            </div>
+        `;
+        elHostRoomList.appendChild(li);
+    });
+
+    elHostRoomList.querySelectorAll('.btn-manage-room').forEach(btn => {
+        btn.onclick = (e) => enterHostRoom(e.currentTarget.dataset.pin);
+    });
+    elHostRoomList.querySelectorAll('.btn-dup-room').forEach(btn => {
+        btn.onclick = async (e) => {
+            const pin = e.currentTarget.dataset.pin;
+            const src = hostRoomsData[pin];
+            if (!src) return;
+            e.currentTarget.disabled = true;
+            try {
+                await duplicateRoom(myHostId, src);
+            } catch (err) {
+                alert(err.message);
+            } finally {
+                e.currentTarget.disabled = false;
+            }
+        };
+    });
+}
+
+function getCheckedPins() {
+    return Array.from(document.querySelectorAll('.room-checkbox:checked')).map(cb => cb.value);
+}
+
+chkSelectAll?.addEventListener('change', () => {
+    document.querySelectorAll('.room-checkbox').forEach(cb => { cb.checked = chkSelectAll.checked; });
 });
 
 btnCreateRoom.addEventListener('click', async () => {
     const title = elNewRoomTitle.value.trim();
-    if(!title) return alert('방 제목을 입력하세요.');
+    if (!title) return alert('방 제목을 입력하세요.');
     btnCreateRoom.disabled = true;
     try {
         await createRoom(myHostId, title);
@@ -150,27 +299,52 @@ btnCreateRoom.addEventListener('click', async () => {
     }
 });
 
-btnLobbyEnd.addEventListener('click', async () => {
-    const checked = Array.from(document.querySelectorAll('.room-checkbox:checked')).map(cb => cb.value);
-    if(checked.length === 0) return alert('종료할 방을 선택하세요.');
-    if(!confirm(`선택한 ${checked.length}개의 방을 최종 종료하시겠습니까?\n모든 플레이어 화면에 최종 순위표가 표시됩니다.`)) return;
-    
-    for(const pin of checked) {
-        // We need to fetch players to calculate penalty
-        // A simple way is to use the callback data from listenHostRooms, but we don't store it globally.
-        // I will just trigger updateRoom status to finished. DB function handles penalties if we pass players.
-        // Actually, we can fetch room data once or just let a client do it. Let's do it simple:
-        await updateRoom(pin, { status: 'calculating_final' });
-        // The distributed transition will catch this and call finishRoom
+// 선택 시작: 방에 들어가지 않고도 선택한 방들의 첫 라운드를 시작
+btnLobbyStart.addEventListener('click', async () => {
+    const checked = getCheckedPins();
+    if (checked.length === 0) return alert('시작할 방을 선택하세요.');
+
+    let started = 0;
+    const skipped = [];
+    for (const pin of checked) {
+        const data = hostRoomsData[pin];
+        if (!data) { skipped.push(`[${pin}] 정보 없음`); continue; }
+        if (data.status !== 'waiting' && data.status !== 'result') {
+            skipped.push(`[${pin}] 이미 진행중`); continue;
+        }
+        const { updates, error } = buildRoundStartUpdates(data);
+        if (error) { skipped.push(`[${pin}] ${error}`); continue; }
+        try {
+            await updateRoom(pin, updates);
+            started++;
+        } catch (e) {
+            skipped.push(`[${pin}] ${e.message}`);
+        }
     }
+    let msg = `${started}개 방을 시작했습니다.`;
+    if (skipped.length) msg += `\n\n건너뛴 방:\n${skipped.join('\n')}`;
+    alert(msg);
+});
+
+// 선택 종료: 호스트가 직접 최종 정산 (접속자가 없어도 확실히 종료됨)
+btnLobbyEnd.addEventListener('click', async () => {
+    const checked = getCheckedPins();
+    if (checked.length === 0) return alert('종료할 방을 선택하세요.');
+    if (!confirm(`선택한 ${checked.length}개의 방을 최종 종료하시겠습니까?\n모든 플레이어 화면에 최종 순위표가 표시됩니다.`)) return;
+
+    for (const pin of checked) {
+        const data = hostRoomsData[pin];
+        await finishRoom(pin, (data && data.players) || {});
+    }
+    alert('종료 처리되었습니다.');
 });
 
 btnLobbyDelete.addEventListener('click', async () => {
-    const checked = Array.from(document.querySelectorAll('.room-checkbox:checked')).map(cb => cb.value);
-    if(checked.length === 0) return alert('삭제할 방을 선택하세요.');
-    if(!confirm(`선택한 ${checked.length}개의 방 데이터를 영구 삭제하시겠습니까?`)) return;
-    
-    for(const pin of checked) {
+    const checked = getCheckedPins();
+    if (checked.length === 0) return alert('삭제할 방을 선택하세요.');
+    if (!confirm(`선택한 ${checked.length}개의 방 데이터를 영구 삭제하시겠습니까?`)) return;
+
+    for (const pin of checked) {
         await removeRoom(pin);
     }
     alert('삭제 완료');
@@ -178,7 +352,7 @@ btnLobbyDelete.addEventListener('click', async () => {
 
 function enterHostRoom(pin) {
     currentPin = pin;
-    if (roomListenerUnsubscribe) roomListenerUnsubscribe(); // Unsubscribe prev room
+    if (roomListenerUnsubscribe) roomListenerUnsubscribe(); // 이전 방 리스너 해제
     roomListenerUnsubscribe = listenRoom(currentPin, handleHostUpdate);
     showScreen('screen-host');
 }
@@ -187,12 +361,56 @@ btnBackLobby.addEventListener('click', () => {
     if (roomListenerUnsubscribe) roomListenerUnsubscribe();
     roomListenerUnsubscribe = null;
     currentPin = null;
-    clearInterval(checkInterval);
+    roomData = null;
     showScreen('screen-host-lobby');
 });
 
+// --- 라운드 시작 updates 생성 (대시보드/로비 공용) ---
+function buildRoundStartUpdates(data) {
+    if (!data || !data.players || Object.keys(data.players).length === 0) {
+        return { error: '참가자가 없습니다.' };
+    }
+    const players = Object.keys(data.players);
+    if (players.length < 2) return { error: '최소 2명이 필요합니다.' };
+
+    const emotions = data.cards?.emotions || [];
+    const situations = data.cards?.situations || [];
+    if (emotions.length < 2 || situations.length < 2) {
+        return { error: '감정/상황 카드가 각각 2개 이상 필요합니다.' };
+    }
+
+    const updates = {};
+    players.forEach(uid => {
+        updates[`players/${uid}/hasGuessed`] = false;
+        updates[`players/${uid}/guess1`] = null;
+        updates[`players/${uid}/guess2`] = null;
+        updates[`players/${uid}/guessTime`] = null;
+        updates[`players/${uid}/roundScore`] = 0;
+        updates[`players/${uid}/roundPenalty`] = 0;
+    });
+
+    let unactedPlayers = players.filter(uid => !data.players[uid].acted);
+    if (unactedPlayers.length === 0) {
+        players.forEach(uid => (updates[`players/${uid}/acted`] = false));
+        unactedPlayers = players;
+    }
+    const actorId = unactedPlayers[Math.floor(Math.random() * unactedPlayers.length)];
+    updates[`players/${actorId}/acted`] = true;
+
+    const targetEmotion = emotions[Math.floor(Math.random() * emotions.length)];
+    const targetSituation = situations[Math.floor(Math.random() * situations.length)];
+
+    updates['currentRound'] = {
+        actorId, targetEmotion, targetSituation,
+        startTime: Date.now(), guessStartTime: 0, isVoided: false, nextRoundTime: null
+    };
+    updates['status'] = 'acting';
+    return { updates };
+}
+
 // --- Core Distributed Logic ---
-// We let ALL clients (host and players) check timers and transition states if necessary.
+// 접속한 모든 클라이언트가 타이머를 확인하고 상태를 전이시킵니다.
+// (점수는 절대값으로 기록하므로 여러 클라이언트가 동시에 써도 결과가 같습니다.)
 function runDistributedChecks(data) {
     if (!data || !currentPin) return;
     const now = Date.now();
@@ -203,65 +421,92 @@ function runDistributedChecks(data) {
     }
 
     if (data.status === 'acting' && data.currentRound) {
-        const endTime = data.currentRound.startTime + (data.settings.watchTime * 1000);
-        if (now > endTime + 500) { // 500ms buffer
+        const endTime = data.currentRound.startTime + ((data.settings?.watchTime || 30) * 1000);
+        if (now > endTime + 500) {
             updateRoom(currentPin, { status: 'guessing', 'currentRound/guessStartTime': endTime + 1500 });
         }
     } else if (data.status === 'guessing' && data.currentRound) {
-        const endTime = data.currentRound.guessStartTime + (data.settings.guessTime * 1000);
+        const endTime = data.currentRound.guessStartTime + ((data.settings?.guessTime || 15) * 1000);
         let allGuessed = true;
         Object.keys(data.players || {}).forEach(uid => {
-            if (uid !== data.currentRound.actorId && !data.players[uid].hasGuessed) {
-                if (data.players[uid].joinTime < data.currentRound.startTime) allGuessed = false;
-            }
+            const p = data.players[uid];
+            if (uid === data.currentRound.actorId) return;
+            if (!joinedBeforeRound(p, data.currentRound)) return; // 라운드 도중 입장자는 무시
+            if (!p.hasGuessed) allGuessed = false;
         });
 
         if (now > endTime + 500 || allGuessed) {
             calculateScores(data);
         }
     } else if (data.status === 'result' && data.currentRound && data.currentRound.nextRoundTime) {
-        if (now > data.currentRound.nextRoundTime + 500 && isHost) {
-            // Only host auto-starts next round to avoid multiple actors
-            btnHostStart.click();
+        // 호스트만 자동 시작하며, nextRoundTime당 한 번만 실행
+        if (now > data.currentRound.nextRoundTime + 500 && isHost && !isStartingRound
+            && autoStartedKey !== data.currentRound.nextRoundTime) {
+            autoStartedKey = data.currentRound.nextRoundTime;
+            triggerNextRound();
         }
     }
 }
 
-// Check every second for distributed transitions
+async function triggerNextRound() {
+    isStartingRound = true;
+    try {
+        const { updates, error } = buildRoundStartUpdates(roomData);
+        if (!error) await updateRoom(currentPin, updates);
+    } finally {
+        isStartingRound = false;
+    }
+}
+
+// 1초마다 분산 전이 확인
 setInterval(() => {
     if (roomData) runDistributedChecks(roomData);
 }, 1000);
-
 
 // --- Host Dashboard Functions ---
 function handleHostUpdate(data) {
     if (!data) return;
     roomData = data;
-    
+
     elHostRoomTitle.innerText = `👑 ${data.title}`;
     elHostPin.innerText = currentPin;
-    
+
     const players = data.players || {};
     elHostPlayerCount.innerText = Object.keys(players).length;
     elHostPlayerList.innerHTML = '';
-    
+
     const actorId = data.currentRound?.actorId;
 
-    Object.values(players).forEach(p => {
+    Object.keys(players).forEach(uid => {
+        const p = players[uid];
         const li = document.createElement('li');
-        const isActor = Object.keys(players).find(key => players[key] === p) === actorId;
-        if(isActor) li.classList.add('is-actor');
-        li.innerText = `${p.nickname} : ${p.score}점 (패널티: ${p.penalties})`;
+        if (uid === actorId) li.classList.add('is-actor');
+
+        const info = document.createElement('span');
+        info.textContent = `${p.nickname} : ${p.score}점 (패널티 ${p.penalties || 0})`;
+
+        const kickBtn = document.createElement('button');
+        kickBtn.className = 'btn-delete-word';
+        kickBtn.textContent = '강퇴';
+        kickBtn.onclick = async () => {
+            if (confirm(`'${p.nickname}' 님을 방에서 내보낼까요?`)) {
+                await kickPlayer(currentPin, uid);
+            }
+        };
+
+        li.appendChild(info);
+        li.appendChild(kickBtn);
         elHostPlayerList.appendChild(li);
     });
 
-    settingWatchTime.value = data.settings.watchTime;
-    settingGuessTime.value = data.settings.guessTime;
-    settingCardCount.value = data.settings.cardCount;
+    if (data.settings) {
+        settingWatchTime.value = data.settings.watchTime;
+        settingGuessTime.value = data.settings.guessTime;
+        settingCardCount.value = data.settings.cardCount;
+    }
 
     btnHostStart.disabled = data.status !== 'waiting' && data.status !== 'result';
 
-    // Render Cards
     renderHostCards(data.cards);
 }
 
@@ -271,21 +516,21 @@ function renderHostCards(cards) {
     listEmotions.innerHTML = '';
     (cards.emotions || []).forEach((w, idx) => {
         const li = document.createElement('li');
-        li.innerHTML = `<span>${w}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="emotions">X</button>`;
+        li.innerHTML = `<span>${escapeHtml(w)}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="emotions">X</button>`;
         listEmotions.appendChild(li);
     });
     listSituations.innerHTML = '';
     (cards.situations || []).forEach((w, idx) => {
         const li = document.createElement('li');
-        li.innerHTML = `<span>${w}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="situations">X</button>`;
+        li.innerHTML = `<span>${escapeHtml(w)}</span> <button class="btn-delete-word" data-idx="${idx}" data-type="situations">X</button>`;
         listSituations.appendChild(li);
     });
 
-    document.querySelectorAll('.btn-delete-word').forEach(btn => {
+    document.querySelectorAll('.btn-delete-word[data-type]').forEach(btn => {
         btn.onclick = async (e) => {
-            const type = e.target.dataset.type;
-            const idx = parseInt(e.target.dataset.idx);
-            let arr = [...roomData.cards[type]];
+            const type = e.currentTarget.dataset.type;
+            const idx = parseInt(e.currentTarget.dataset.idx);
+            const arr = [...(roomData.cards?.[type] || [])];
             arr.splice(idx, 1);
             await updateRoom(currentPin, { [`cards/${type}`]: arr });
         };
@@ -294,8 +539,8 @@ function renderHostCards(cards) {
 
 btnAddEmotion.addEventListener('click', async () => {
     const w = inputEmotion.value.trim();
-    if(w) {
-        let arr = [...(roomData.cards.emotions || []), w];
+    if (w) {
+        const arr = [...(roomData.cards?.emotions || []), w];
         await updateRoom(currentPin, { 'cards/emotions': arr });
         inputEmotion.value = '';
     }
@@ -303,8 +548,8 @@ btnAddEmotion.addEventListener('click', async () => {
 
 btnAddSituation.addEventListener('click', async () => {
     const w = inputSituation.value.trim();
-    if(w) {
-        let arr = [...(roomData.cards.situations || []), w];
+    if (w) {
+        const arr = [...(roomData.cards?.situations || []), w];
         await updateRoom(currentPin, { 'cards/situations': arr });
         inputSituation.value = '';
     }
@@ -312,7 +557,7 @@ btnAddSituation.addEventListener('click', async () => {
 
 btnSaveDeck.addEventListener('click', async () => {
     const name = inputDeckName.value.trim();
-    if(!name) return alert('덱 이름을 입력하세요.');
+    if (!name) return alert('덱 이름을 입력하세요.');
     await saveDeck(myHostId, name, roomData.cards);
     inputDeckName.value = '';
     alert('저장되었습니다!');
@@ -320,9 +565,9 @@ btnSaveDeck.addEventListener('click', async () => {
 
 btnLoadDeck.addEventListener('click', async () => {
     const deckId = deckSelector.value;
-    if(!deckId) return alert('불러올 덱을 선택하세요.');
+    if (!deckId) return alert('불러올 덱을 선택하세요.');
     const deck = myDecks[deckId];
-    if(deck) {
+    if (deck) {
         await updateRoom(currentPin, {
             'cards/emotions': deck.emotions || [],
             'cards/situations': deck.situations || []
@@ -344,75 +589,58 @@ btnSaveSettings.addEventListener('click', async () => {
 });
 
 btnHostStart.addEventListener('click', async () => {
-    if (!roomData || !roomData.players) return alert('참가자가 없습니다.');
-    const players = Object.keys(roomData.players);
-    if (players.length < 2) return alert('최소 2명의 참가자가 필요합니다. (연기자 1, 정답자 1)');
-
-    const emotions = roomData.cards.emotions || [];
-    const situations = roomData.cards.situations || [];
-    if(emotions.length < 2 || situations.length < 2) return alert('감정과 상황 카드가 최소 2개 이상 필요합니다.');
-
-    const updates = {};
-    players.forEach(uid => {
-        updates[`players/${uid}/hasGuessed`] = false;
-        updates[`players/${uid}/guess1`] = null;
-        updates[`players/${uid}/guess2`] = null;
-        updates[`players/${uid}/guessTime`] = null;
-        updates[`players/${uid}/roundScore`] = 0; // reset round score
-    });
-
-    let unactedPlayers = players.filter(uid => !roomData.players[uid].acted);
-    if (unactedPlayers.length === 0) {
-        players.forEach(uid => updates[`players/${uid}/acted`] = false);
-        unactedPlayers = players;
-    }
-    const actorId = unactedPlayers[Math.floor(Math.random() * unactedPlayers.length)];
-    updates[`players/${actorId}/acted`] = true;
-
-    const targetEmotion = emotions[Math.floor(Math.random() * emotions.length)];
-    const targetSituation = situations[Math.floor(Math.random() * situations.length)];
-
-    updates['currentRound'] = {
-        actorId, targetEmotion, targetSituation,
-        startTime: Date.now(), guessStartTime: 0, isVoided: false, nextRoundTime: null
-    };
-    updates['status'] = 'acting';
+    const { updates, error } = buildRoundStartUpdates(roomData);
+    if (error) return alert(error);
     await updateRoom(currentPin, updates);
 });
 
 btnHostVoid.addEventListener('click', async () => {
-    if (!isHost || roomData?.status !== 'result') {
-        if(confirm('진행중인 게임을 무효화하고 대기실로 돌아갈까요?')) {
+    // 결과 화면이 아니면: 진행중인 게임을 무효화하고 대기실로 (아직 점수 반영 전)
+    if (roomData?.status !== 'result') {
+        if (confirm('진행중인 게임을 무효화하고 대기실로 돌아갈까요?')) {
             await updateRoom(currentPin, { status: 'waiting', 'currentRound/isVoided': true });
         }
         return;
     }
-    if (confirm('이 라운드의 점수를 무효화하시겠습니까?')) {
-        await updateRoom(currentPin, { 'currentRound/isVoided': true });
-        alert('무효 처리되었습니다.');
-    }
+    // 결과 화면이면: 이미 반영된 이번 라운드 점수/페널티를 되돌림
+    if (roomData.currentRound?.isVoided) return alert('이미 무효 처리된 라운드입니다.');
+    if (!confirm('이 라운드의 점수를 무효화(되돌리기)하시겠습니까?')) return;
+
+    const players = roomData.players || {};
+    const updates = { 'currentRound/isVoided': true };
+    Object.keys(players).forEach(uid => {
+        const p = players[uid];
+        updates[`players/${uid}/score`] = (p.score || 0) - (p.roundScore || 0);
+        updates[`players/${uid}/penalties`] = Math.max(0, (p.penalties || 0) - (p.roundPenalty || 0));
+        updates[`players/${uid}/roundScore`] = 0;
+        updates[`players/${uid}/roundPenalty`] = 0;
+    });
+    await updateRoom(currentPin, updates);
+    alert('무효 처리되었습니다. (점수 원상복구)');
 });
 
 async function calculateScores(data) {
+    if (!data.currentRound) return;
+
     if (data.currentRound.isVoided) {
         await updateRoom(currentPin, { status: 'result', 'currentRound/nextRoundTime': Date.now() + 10000 });
         return;
     }
-    
-    // Idempotency check: if nextRoundTime is set, scores were already calculated
+
+    // 멱등성: nextRoundTime이 이미 있으면 점수 계산 완료된 것
     if (data.currentRound.nextRoundTime) return;
 
-    const { actorId, targetEmotion, targetSituation, startTime } = data.currentRound;
+    const { actorId, targetEmotion, targetSituation } = data.currentRound;
     const players = data.players || {};
-    
-    let correctGuessers = [];
-    let wrongGuessers = [];
-    let timeoutGuessers = [];
+
+    const correctGuessers = [];
+    const wrongGuessers = [];
+    const timeoutGuessers = [];
 
     Object.keys(players).forEach(uid => {
         if (uid === actorId) return;
         const p = players[uid];
-        if (p.joinTime > startTime) return;
+        if (!joinedBeforeRound(p, data.currentRound)) return;
 
         if (!p.hasGuessed) timeoutGuessers.push(uid);
         else if (p.guess1 === targetEmotion && p.guess2 === targetSituation) correctGuessers.push({ uid, guessTime: p.guessTime });
@@ -421,25 +649,29 @@ async function calculateScores(data) {
 
     correctGuessers.sort((a, b) => a.guessTime - b.guessTime);
     const updates = {};
-    
-    let actorTotal = 10 + (correctGuessers.length * 5);
+
+    const actorTotal = 10 + (correctGuessers.length * 5);
     updates[`players/${actorId}/score`] = (players[actorId].score || 0) + actorTotal;
     updates[`players/${actorId}/roundScore`] = actorTotal;
+    updates[`players/${actorId}/roundPenalty`] = 0;
 
     correctGuessers.forEach((g, index) => {
-        let pts = index === 0 ? 30 : index === 1 ? 20 : 10;
+        const pts = index === 0 ? 30 : index === 1 ? 20 : 10;
         updates[`players/${g.uid}/score`] = (players[g.uid].score || 0) + pts;
         updates[`players/${g.uid}/roundScore`] = pts;
+        updates[`players/${g.uid}/roundPenalty`] = 0;
     });
 
     wrongGuessers.forEach(uid => {
         updates[`players/${uid}/score`] = (players[uid].score || 0) - 5;
         updates[`players/${uid}/roundScore`] = -5;
         updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
+        updates[`players/${uid}/roundPenalty`] = 1;
     });
     timeoutGuessers.forEach(uid => {
         updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
         updates[`players/${uid}/roundScore`] = 0;
+        updates[`players/${uid}/roundPenalty`] = 1;
     });
 
     updates['status'] = 'result';
@@ -460,11 +692,15 @@ btnJoin.addEventListener('click', async () => {
         currentPin = pin;
         currentUid = res.uid;
         isHost = false;
-        
+        wasInRoom = false;
+        lastStatus = null;
+
         elMyNickname.innerText = nickname;
-        listenRoom(currentPin, handlePlayerUpdate);
+        if (playerRoomUnsub) playerRoomUnsub();
+        playerRoomUnsub = listenRoom(currentPin, handlePlayerUpdate);
     } catch (e) {
         alert(e.message);
+    } finally {
         btnJoin.disabled = false;
     }
 });
@@ -472,23 +708,40 @@ btnJoin.addEventListener('click', async () => {
 let lastStatus = null;
 
 function handlePlayerUpdate(data) {
-    if (!data) return alert('방이 삭제되었습니다.');
+    if (!data) {
+        // 방 자체가 삭제됨
+        if (playerRoomUnsub) { playerRoomUnsub(); playerRoomUnsub = null; }
+        alert('방이 삭제되었습니다.');
+        location.reload();
+        return;
+    }
     roomData = data;
-    
-    const me = data.players[currentUid];
-    if (!me) return; 
+
+    const players = data.players || {};
+    const me = players[currentUid];
+    if (!me) {
+        // 내가 방에 있다가 사라짐 → 강퇴됨
+        if (wasInRoom) {
+            wasInRoom = false;
+            if (playerRoomUnsub) { playerRoomUnsub(); playerRoomUnsub = null; }
+            alert('선생님에 의해 방에서 나가게 되었습니다.');
+            location.reload();
+        }
+        return;
+    }
+    wasInRoom = true;
 
     elMyScore.innerText = me.score || 0;
     const amActor = data.currentRound?.actorId === currentUid;
-    const joinedMidRound = me.joinTime > data.currentRound?.startTime;
+    const joinedMidRound = !joinedBeforeRound(me, data.currentRound);
 
     if (data.status === 'finished') {
         showScreen('screen-final-result');
         elFinalResultList.innerHTML = '';
-        const sorted = Object.values(data.players).sort((a,b) => (b.finalScore || 0) - (a.finalScore || 0));
+        const sorted = Object.values(players).sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));
         sorted.forEach((p, idx) => {
             const li = document.createElement('li');
-            li.innerHTML = `<span>${idx === 0 ? '👑' : ''} ${idx+1}위. ${p.nickname}</span> <span>${p.finalScore}점 (패널티 -${(p.penalties||0)*20}점 반영)</span>`;
+            li.innerHTML = `<span>${idx === 0 ? '👑' : ''} ${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${p.finalScore ?? p.score ?? 0}점 (패널티 -${(p.penalties || 0) * 20}점 반영)</span>`;
             if (p.nickname === me.nickname) li.style.color = '#FCD34D';
             elFinalResultList.appendChild(li);
         });
@@ -496,21 +749,21 @@ function handlePlayerUpdate(data) {
     else if (data.status === 'waiting') {
         showScreen('screen-waiting');
         elWaitingMsg.innerText = "선생님이 게임을 시작할 때까지 기다려주세요!";
-    } 
+    }
     else if (data.status === 'acting') {
         if (amActor) {
             showScreen('screen-actor');
             elActorEmotion.innerText = data.currentRound.targetEmotion;
             elActorSituation.innerText = data.currentRound.targetSituation;
-            updateActorTimer(data.currentRound.startTime, data.settings.watchTime);
+            updateActorTimer(data.currentRound.startTime, data.settings?.watchTime || 30);
         } else {
             showScreen('screen-blind');
-            updateBlindTimer(data.currentRound.startTime, data.settings.watchTime);
+            updateBlindTimer(data.currentRound.startTime, data.settings?.watchTime || 30);
         }
-    } 
+    }
     else if (data.status === 'guessing') {
         if (lastStatus === 'acting') showSyncPopup();
-        
+
         if (amActor) {
             showScreen('screen-waiting');
             elWaitingMsg.innerText = "친구들이 정답을 맞히고 있습니다...";
@@ -524,20 +777,23 @@ function handlePlayerUpdate(data) {
                 renderGuessCards(1);
                 showScreen('screen-guess1');
             }
-            updateGuessTimer(data.currentRound.guessStartTime, data.settings.guessTime);
+            updateGuessTimer(data.currentRound.guessStartTime, data.settings?.guessTime || 15);
         }
     }
     else if (data.status === 'result') {
         showScreen('screen-result');
         elResultEmotion.innerText = data.currentRound.targetEmotion;
         elResultSituation.innerText = data.currentRound.targetSituation;
-        
+
         elResultList.innerHTML = '';
-        const sorted = Object.values(data.players).sort((a,b) => b.score - a.score);
+        const sorted = Object.values(players).sort((a, b) => (b.score || 0) - (a.score || 0));
         sorted.forEach((p, idx) => {
             const li = document.createElement('li');
-            const roundPts = p.roundScore !== undefined ? (p.roundScore > 0 ? `<span style="color:#34D399; font-size:0.9rem;">(+${p.roundScore})</span>` : p.roundScore < 0 ? `<span style="color:#F87171; font-size:0.9rem;">(${p.roundScore})</span>` : '') : '';
-            li.innerHTML = `<span>${idx+1}위. ${p.nickname}</span> <span>${p.score}점 ${roundPts}</span>`;
+            const roundPts = p.roundScore !== undefined
+                ? (p.roundScore > 0 ? `<span style="color:#34D399; font-size:0.9rem;">(+${p.roundScore})</span>`
+                    : p.roundScore < 0 ? `<span style="color:#F87171; font-size:0.9rem;">(${p.roundScore})</span>` : '')
+                : '';
+            li.innerHTML = `<span>${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${p.score}점 ${roundPts}</span>`;
             if (p.nickname === me.nickname) li.style.color = '#FCD34D';
             elResultList.appendChild(li);
         });
@@ -564,21 +820,21 @@ btnActorDone.addEventListener('click', async () => {
 function updateActorTimer(st, wt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(wt - (Date.now() - st)/1000);
+        const left = Math.ceil(wt - (Date.now() - st) / 1000);
         elActorTimer.innerText = Math.max(0, left);
     }, 200);
 }
 function updateBlindTimer(st, wt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(wt - (Date.now() - st)/1000);
+        const left = Math.ceil(wt - (Date.now() - st) / 1000);
         elBlindTimer.innerText = Math.max(0, left);
     }, 200);
 }
 function updateGuessTimer(st, gt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil(gt - (Date.now() - st)/1000);
+        const left = Math.ceil(gt - (Date.now() - st) / 1000);
         elGuess1Timer.innerText = Math.max(0, left);
         elGuess2Timer.innerText = Math.max(0, left);
     }, 200);
@@ -586,7 +842,7 @@ function updateGuessTimer(st, gt) {
 function updateResultTimer(nt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
-        let left = Math.ceil((nt - Date.now())/1000);
+        const left = Math.ceil((nt - Date.now()) / 1000);
         elResultTimer.innerText = Math.max(0, left);
     }, 200);
 }
@@ -596,7 +852,7 @@ function showSyncPopup() {
     screenSync.classList.remove('hidden');
     let count = 3;
     elSyncText.innerText = count;
-    
+
     const intv = setInterval(() => {
         count--;
         if (count > 0) {
@@ -615,9 +871,9 @@ function showSyncPopup() {
 
 // Guess Cards Rendering
 function getRandomCards(target, list, count) {
-    let others = list.filter(item => item !== target);
+    const others = [...new Set(list.filter(item => item !== target))];
     others.sort(() => 0.5 - Math.random());
-    let selected = [target, ...others.slice(0, count - 1)];
+    const selected = [target, ...others.slice(0, count - 1)];
     selected.sort(() => 0.5 - Math.random());
     return selected;
 }
@@ -625,7 +881,7 @@ function getRandomCards(target, list, count) {
 function renderGuessCards(phase) {
     const r = roomData.currentRound;
     const c = roomData.cards;
-    const cardCount = roomData.settings.cardCount;
+    const cardCount = roomData.settings?.cardCount || 6;
 
     if (phase === 1) {
         elGuess1Cards.innerHTML = '';

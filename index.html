@@ -31,9 +31,9 @@
         <div id="screen-host-lobby" class="screen">
             <header class="host-header box-glass">
                 <h2>👑 호스트 로비</h2>
-                <div class="host-info">내 방 목록 관리</div>
+                <div class="host-info">내 방 목록 관리 <button id="btn-logout" class="btn-text" style="padding:0; margin:0 0 0 10px; font-size:1rem;">로그아웃</button></div>
             </header>
-            
+
             <div class="dashboard-grid">
                 <div class="panel box-glass">
                     <h3>새 방 만들기</h3>
@@ -41,13 +41,15 @@
                     <button id="btn-create-room" class="btn-primary">방 생성하기</button>
                 </div>
                 <div class="panel box-glass" style="grid-column: span 1;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
                         <h3 style="margin:0;">내 방 목록</h3>
-                        <div>
-                            <button id="btn-lobby-end" class="btn-primary" style="padding:5px 10px; font-size:1rem; margin-right:5px;">선택 종료</button>
+                        <div class="lobby-actions">
+                            <button id="btn-lobby-start" class="btn-secondary" style="padding:5px 10px; font-size:1rem;">선택 시작</button>
+                            <button id="btn-lobby-end" class="btn-primary" style="padding:5px 10px; font-size:1rem;">선택 종료</button>
                             <button id="btn-lobby-delete" class="btn-danger" style="padding:5px 10px; font-size:1rem;">선택 삭제</button>
                         </div>
                     </div>
+                    <label class="select-all-wrap"><input type="checkbox" id="chk-select-all" style="width:18px; height:18px;"> 전체 선택</label>
                     <ul id="host-room-list" class="player-list"></ul>
                 </div>
             </div>
@@ -208,6 +210,21 @@
                 </ul>
             </div>
             <button class="btn-text" style="margin-top:20px;" onclick="location.reload()">처음 화면으로</button>
+        </div>
+
+        <!-- Modal: Host Login -->
+        <div id="modal-host-login" class="overlay-screen hidden">
+            <div class="modal-box box-glass">
+                <h3>선생님 로그인</h3>
+                <p class="modal-hint">처음 쓰는 아이디는 자동으로 등록됩니다.<br>같은 아이디·비밀번호면 어느 기기서든 내 방을 볼 수 있어요.</p>
+                <input type="text" id="host-login-id" placeholder="아이디 (예: 김선생)" maxlength="20" autocomplete="off">
+                <input type="password" id="host-login-pw" placeholder="비밀번호" maxlength="30" autocomplete="off">
+                <div class="modal-actions">
+                    <button id="btn-host-login-submit" class="btn-primary">로그인 / 등록</button>
+                    <button id="btn-host-login-cancel" class="btn-text">취소</button>
+                </div>
+                <div id="host-login-error" class="modal-error"></div>
+            </div>
         </div>
     </div>
     <script type="module" src="/src/main.js"></script>

@@ -1,53 +1,64 @@
 import { db } from './firebase.js';
 import { ref, set, get, update, onValue, serverTimestamp, remove } from "firebase/database";
 
-export const createRoom = async (hostId, title) => {
+const DEFAULT_CARDS = {
+    emotions: ['기쁨', '슬픔', '분노', '놀람', '두려움', '당황', '행복', '짜증'],
+    situations: ['복권에 당첨되었을 때', '길을 잃었을 때', '숙제를 안 했을 때', '생일 파티에서', '유령을 보았을 때', '맛있는 걸 먹을 때', '넘어졌을 때', '칭찬 받았을 때']
+};
+const DEFAULT_SETTINGS = { watchTime: 30, guessTime: 15, cardCount: 6 };
+
+// Firebase 연결 지연(가짜 설정) 감지용 타임아웃 래퍼
+const withTimeout = (promise) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase 연결 지연: src/firebase.js 파일에 실제 Firebase 설정값을 입력했는지 확인해주세요!')), 3000))
+]);
+
+// --- Host 로그인 (아이디별 비밀번호 해시를 DB에 저장) ---
+export const loginOrRegisterHost = async (hostId, passHash) => {
+    const authRef = ref(db, `hostAuth/${hostId}`);
+    const snapshot = await withTimeout(get(authRef));
+    if (!snapshot.exists()) {
+        await set(authRef, { passHash, createdAt: serverTimestamp() });
+        return 'created';
+    }
+    return snapshot.val().passHash === passHash ? 'ok' : 'wrong';
+};
+
+// --- 방 생성 (extra로 카드/설정 복제 지원) ---
+export const createRoom = async (hostId, title, extra = {}) => {
     const pin = Math.floor(100000 + Math.random() * 900000).toString();
     const roomRef = ref(db, `rooms/${pin}`);
-    
-    // Add timeout to prevent hanging on fake config
-    const snapshot = await Promise.race([
-        get(roomRef),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase 연결 지연: src/firebase.js 파일에 실제 Firebase 설정값을 입력했는지 확인해주세요!')), 3000))
-    ]);
 
+    const snapshot = await withTimeout(get(roomRef));
     if (snapshot.exists()) {
-        return createRoom(hostId, title); // Retry if PIN collision
+        return createRoom(hostId, title, extra); // PIN 충돌 시 재시도
     }
 
     await set(roomRef, {
         hostId,
         title: title || '새로운 게임 방',
-        status: 'waiting', // waiting, acting, guessing, result
-        settings: {
-            watchTime: 30,
-            guessTime: 15,
-            cardCount: 6,
-        },
+        status: 'waiting', // waiting, acting, guessing, result, finished
+        settings: extra.settings || { ...DEFAULT_SETTINGS },
         currentRound: null,
         players: {},
-        cards: {
-            emotions: ['기쁨', '슬픔', '분노', '놀람', '두려움', '당황', '행복', '짜증'],
-            situations: ['복권에 당첨되었을 때', '길을 잃었을 때', '숙제를 안 했을 때', '생일 파티에서', '유령을 보았을 때', '맛있는 걸 먹을 때', '넘어졌을 때', '칭찬 받았을 때']
-        }
+        cards: extra.cards || { ...DEFAULT_CARDS }
     });
 
     return pin;
 };
 
+// --- 방 복제 (같은 덱/설정으로 새 방) ---
+export const duplicateRoom = async (hostId, source) => {
+    const cards = source.cards
+        ? { emotions: source.cards.emotions || [], situations: source.cards.situations || [] }
+        : undefined;
+    const settings = source.settings ? { ...DEFAULT_SETTINGS, ...source.settings } : undefined;
+    return createRoom(hostId, `${source.title || '게임 방'} (복사)`, { cards, settings });
+};
+
 export const joinRoom = async (pin, nickname) => {
     const roomRef = ref(db, `rooms/${pin}`);
-    
-    // Add timeout to prevent hanging on fake config
-    let snapshot;
-    try {
-        snapshot = await Promise.race([
-            get(roomRef),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Firebase 연결 지연: src/firebase.js 파일에 실제 Firebase 설정값을 입력했는지 확인해주세요!')), 3000))
-        ]);
-    } catch(e) {
-        throw e;
-    }
+    const snapshot = await withTimeout(get(roomRef));
 
     if (!snapshot.exists()) {
         throw new Error('방을 찾을 수 없습니다.');
@@ -55,14 +66,14 @@ export const joinRoom = async (pin, nickname) => {
 
     let uid = localStorage.getItem(`uid_${pin}`);
     if (!uid) {
-        uid = `user_${Date.now()}_${Math.floor(Math.random()*1000)}`;
+        uid = `user_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
         localStorage.setItem(`uid_${pin}`, uid);
     }
     localStorage.setItem('lastNickname', nickname);
 
     const playerRef = ref(db, `rooms/${pin}/players/${uid}`);
     const playerSnapshot = await get(playerRef);
-    
+
     if (!playerSnapshot.exists()) {
         await set(playerRef, {
             nickname,
@@ -73,6 +84,8 @@ export const joinRoom = async (pin, nickname) => {
             guess1: null,
             guess2: null,
             guessTime: null,
+            roundScore: 0,
+            roundPenalty: 0,
             joinTime: serverTimestamp()
         });
     } else {
@@ -97,6 +110,10 @@ export const updateRoom = async (pin, updates) => {
 export const updatePlayer = async (pin, uid, updates) => {
     const playerRef = ref(db, `rooms/${pin}/players/${uid}`);
     await update(playerRef, updates);
+};
+
+export const kickPlayer = async (pin, uid) => {
+    await remove(ref(db, `rooms/${pin}/players/${uid}`));
 };
 
 export const submitGuess = async (pin, uid, guess1, guess2, guessTime) => {
@@ -129,9 +146,7 @@ export const listenDecks = (hostId, callback) => {
 
 export const listenHostRooms = (hostId, callback) => {
     const roomsRef = ref(db, `rooms`);
-    // Ideally we should use query and orderByChild('hostId'), but for simplicity and lack of index, 
-    // we can listen to all rooms and filter locally, or use proper Firebase queries.
-    // Let's use basic filtering for now since the app scale is small.
+    // 규모가 작아 전체를 받아 로컬에서 hostId로 필터링합니다.
     return onValue(roomsRef, (snapshot) => {
         const allRooms = snapshot.val() || {};
         const myRooms = {};
@@ -143,22 +158,23 @@ export const listenHostRooms = (hostId, callback) => {
         callback(myRooms);
     });
 };
+
 export const removeRoom = async (pin) => {
     const roomRef = ref(db, `rooms/${pin}`);
     await remove(roomRef);
 };
 
 export const finishRoom = async (pin, players) => {
-    // calculate final penalties
+    // 최종 페널티 정산 후 종료 상태로 전환 (절대값 기록 → 여러 번 호출해도 안전)
     const updates = {};
     updates['status'] = 'finished';
-    Object.keys(players).forEach(uid => {
+    Object.keys(players || {}).forEach(uid => {
         const p = players[uid];
         const penalties = p.penalties || 0;
         const finalScore = (p.score || 0) - (penalties * 20);
         updates[`players/${uid}/finalScore`] = finalScore;
     });
-    
+
     const roomRef = ref(db, `rooms/${pin}`);
     await update(roomRef, updates);
 };
