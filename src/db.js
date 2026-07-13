@@ -143,3 +143,22 @@ export const listenHostRooms = (hostId, callback) => {
         callback(myRooms);
     });
 };
+export const removeRoom = async (pin) => {
+    const roomRef = ref(db, `rooms/${pin}`);
+    await remove(roomRef);
+};
+
+export const finishRoom = async (pin, players) => {
+    // calculate final penalties
+    const updates = {};
+    updates['status'] = 'finished';
+    Object.keys(players).forEach(uid => {
+        const p = players[uid];
+        const penalties = p.penalties || 0;
+        const finalScore = (p.score || 0) - (penalties * 20);
+        updates[`players/${uid}/finalScore`] = finalScore;
+    });
+    
+    const roomRef = ref(db, `rooms/${pin}`);
+    await update(roomRef, updates);
+};

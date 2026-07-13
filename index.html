@@ -41,7 +41,13 @@
                     <button id="btn-create-room" class="btn-primary">방 생성하기</button>
                 </div>
                 <div class="panel box-glass" style="grid-column: span 1;">
-                    <h3>내 방 목록</h3>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h3 style="margin:0;">내 방 목록</h3>
+                        <div>
+                            <button id="btn-lobby-end" class="btn-primary" style="padding:5px 10px; font-size:1rem; margin-right:5px;">선택 종료</button>
+                            <button id="btn-lobby-delete" class="btn-danger" style="padding:5px 10px; font-size:1rem;">선택 삭제</button>
+                        </div>
+                    </div>
                     <ul id="host-room-list" class="player-list"></ul>
                 </div>
             </div>
@@ -171,17 +177,37 @@
             <h1 id="sync-text" class="zoom-in">3</h1>
         </div>
 
-        <!-- Screen: Results -->
-        <div id="screen-result" class="screen theme-dark">
-            <h2>라운드 결과</h2>
-            <div class="result-answer box-glass">
-                정답: <span id="result-emotion" class="color-blue"></span> <br>+ <span id="result-situation" class="color-red"></span>
+        <!-- Screen: Result -->
+        <div id="screen-result" class="screen">
+            <h2 class="animate-bounce">정답은?</h2>
+            <div class="result-cards">
+                <div class="card card-blue" id="result-emotion">---</div>
+                <div class="card card-red" id="result-situation">---</div>
             </div>
-            <div class="scoreboard box-glass">
-                <h3>순위표</h3>
-                <ul id="result-list" class="player-list"></ul>
+            
+            <div class="box-glass" style="margin-top: 30px;">
+                <h3 style="margin-bottom: 10px;">🏆 현재 순위</h3>
+                <ul id="result-list" class="player-list">
+                    <!-- Results populated dynamically with round scores -->
+                </ul>
             </div>
-            <div id="result-next-msg" class="pulse">잠시 후 다음 라운드가 시작됩니다... <span id="result-timer">10</span></div>
+            
+            <div id="result-next-msg" style="margin-top: 20px; font-size: 1.2rem; color: #FBBF24; display: none;">
+                다음 라운드까지: <span id="result-timer"></span>초
+            </div>
+        </div>
+
+        <!-- Screen: Final Result (New) -->
+        <div id="screen-final-result" class="screen">
+            <h1 class="animate-bounce" style="font-size: 3rem; color: #FCD34D;">🎉 게임 종료 🎉</h1>
+            <h2 style="margin-bottom: 30px;">수고하셨습니다!</h2>
+            <div class="box-glass">
+                <h3 style="margin-bottom: 10px;">🏆 최종 순위 (패널티 정산 완료)</h3>
+                <ul id="final-result-list" class="player-list">
+                    <!-- Final Results populated dynamically -->
+                </ul>
+            </div>
+            <button class="btn-text" style="margin-top:20px;" onclick="location.reload()">처음 화면으로</button>
         </div>
     </div>
     <script type="module" src="/src/main.js"></script>
