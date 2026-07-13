@@ -15,8 +15,8 @@
 
 body {
   font-family: 'Jua', sans-serif;
-  background: var(--light);
-  color: #333;
+  background: var(--dark-grad);
+  color: white;
   overflow: hidden;
   user-select: none;
 }
@@ -97,10 +97,11 @@ input {
   font-family: 'Jua', sans-serif;
   padding: 12px;
   border-radius: 8px;
-  border: 2px solid #ccc;
+  border: none;
   font-size: 1.2rem;
   width: 100%;
   margin-bottom: 10px;
+  color: #333;
 }
 
 /* Animations */
@@ -126,7 +127,7 @@ input {
 .landing-content {
   max-width: 400px; margin: auto; text-align: center;
 }
-.join-card { margin: 20px 0; background: white; color: black; }
+.join-card { margin: 20px 0; }
 .host-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; color: white;}
 .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; color: white; }
 @media(max-width: 768px) { .dashboard-grid { grid-template-columns: 1fr; } }
