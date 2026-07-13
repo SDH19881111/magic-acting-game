@@ -2,7 +2,7 @@ import './style.css';
 import {
     createRoom, joinRoom, listenRoom, updateRoom, submitGuess,
     saveDeck, listenDecks, listenHostRooms, removeRoom, finishRoom,
-    loginOrRegisterHost, kickPlayer, duplicateRoom
+    loginOrRegisterHost, kickPlayer, duplicateRoom, claimScoring
 } from './db.js';
 
 // --- Helpers ---
@@ -27,6 +27,8 @@ function hostIdFromName(name) {
 
 // 시계 오차(서버 joinTime vs 호스트 Date.now startTime)를 흡수하기 위한 버퍼
 const JOIN_BUFFER = 3000;
+// 준비(ready) 상태에서 연기자가 '준비완료'를 누르지 않아도 이 시간이 지나면 자동으로 연기를 시작(무한 대기 방지)
+const READY_TIMEOUT = 25000;
 function joinedBeforeRound(player, round) {
     if (!round) return true;
     return (player.joinTime || 0) <= (round.startTime || 0) + JOIN_BUFFER;
@@ -417,7 +419,8 @@ function buildReadyUpdates(data, seed) {
 
     updates['currentRound'] = {
         actorId, targetEmotion, targetSituation,
-        startTime: null, guessStartTime: 0, isVoided: false, nextRoundTime: null
+        startTime: null, guessStartTime: 0, isVoided: false, nextRoundTime: null,
+        readyTime: Date.now()   // 준비 상태 진입 시각(연기자 잠수 시 자동 시작 판단용)
     };
     updates['status'] = 'ready';
     return { updates };
@@ -462,13 +465,24 @@ function runDistributedChecks(data) {
             transitionToReady(data, data.currentRound.startTime);
         }
     } else if (data.status === 'ready' && data.currentRound) {
-        // 안전장치: 준비 상태에서 연기자가 나가버리면(강퇴/이탈) 다른 사람으로 재구성
         const actorId = data.currentRound.actorId;
+        // 안전장치 1: 준비 상태에서 연기자가 나가버리면(강퇴/이탈) 다른 사람으로 재구성
         if (!data.players || !data.players[actorId]) {
             const rebuildKey = 'rebuild_' + actorId;
             if (!isStartingRound && autoStartedKey !== rebuildKey) {
                 autoStartedKey = rebuildKey;
                 transitionToReady(data); // seed 미지정 → 참가자 목록 해시로 결정론 계산
+            }
+        }
+        // 안전장치 2: 연기자가 접속은 되어 있으나 준비완료를 오래 안 누르면 자동으로 연기 시작(무한 대기 방지)
+        else {
+            const readyTime = data.currentRound.readyTime || 0;
+            if (readyTime && now > readyTime + READY_TIMEOUT) {
+                const autoActKey = 'autoact_' + readyTime;
+                if (!isStartingRound && autoStartedKey !== autoActKey) {
+                    autoStartedKey = autoActKey;
+                    updateRoom(currentPin, { status: 'acting', 'currentRound/startTime': now });
+                }
             }
         }
     }
@@ -653,13 +667,18 @@ btnHostVoid.addEventListener('click', async () => {
 async function calculateScores(data) {
     if (!data.currentRound) return;
 
+    // 멱등성: nextRoundTime이 이미 있으면 점수 계산 완료된 것
+    if (data.currentRound.nextRoundTime) return;
+
+    // 접속자 여러 명이 동시에 채점하면 각자의 스냅샷 차이로 같은 학생 점수가 어긋날 수 있으므로,
+    // 트랜잭션으로 '채점 권한'을 한 명만 얻도록 하고 나머지는 중단한다.
+    const won = await claimScoring(currentPin);
+    if (!won) return;
+
     if (data.currentRound.isVoided) {
         await updateRoom(currentPin, { status: 'result', 'currentRound/nextRoundTime': Date.now() + 10000 });
         return;
     }
-
-    // 멱등성: nextRoundTime이 이미 있으면 점수 계산 완료된 것
-    if (data.currentRound.nextRoundTime) return;
 
     const { actorId, targetEmotion, targetSituation } = data.currentRound;
     const players = data.players || {};

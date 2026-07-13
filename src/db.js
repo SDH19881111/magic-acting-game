@@ -1,5 +1,5 @@
 import { db } from './firebase.js';
-import { ref, set, get, update, onValue, serverTimestamp, remove } from "firebase/database";
+import { ref, set, get, update, onValue, serverTimestamp, remove, runTransaction } from "firebase/database";
 
 const DEFAULT_CARDS = {
     emotions: ['기쁨', '슬픔', '분노', '놀람', '두려움', '당황', '행복', '짜증'],
@@ -93,6 +93,18 @@ export const joinRoom = async (pin, nickname) => {
     }
 
     return { uid, roomData: snapshot.val() };
+};
+
+// 채점을 여러 클라이언트가 동시에 하지 않도록 '채점 권한'을 트랜잭션으로 한 명만 획득.
+// 획득한 클라이언트가 도중에 끊겨도 5초 뒤 다른 클라이언트가 재획득해 진행이 멈추지 않도록 함.
+export const claimScoring = async (pin) => {
+    const claimRef = ref(db, `rooms/${pin}/currentRound/scoreClaim`);
+    const res = await runTransaction(claimRef, (cur) => {
+        const now = Date.now();
+        if (cur && cur.at && now - cur.at < 5000) return; // 유효한 잠금이 있으면 중단(=획득 실패)
+        return { at: now };
+    });
+    return res.committed; // true면 이 클라이언트가 채점 권한을 얻음
 };
 
 export const listenRoom = (pin, callback) => {
