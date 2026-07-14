@@ -108,6 +108,19 @@ export const claimScoring = async (pin) => {
     return res.committed; // true면 이 클라이언트가 채점 권한을 얻음
 };
 
+// 다음 라운드 구성(연기자/문제 선정)을 여러 클라이언트가 동시에 하지 않도록,
+// 특정 전환(key)에 대해 한 명만 권한을 얻게 함. 승자가 끊겨도 5초 뒤 재획득 가능(복구).
+export const claimTransition = async (pin, key) => {
+    const claimRef = ref(db, `rooms/${pin}/transitionClaim`);
+    const res = await runTransaction(claimRef, (cur) => {
+        const now = Date.now();
+        // 같은 전환에 유효한 잠금이 살아있으면 중단(=획득 실패)
+        if (cur && cur.key === key && cur.at && now - cur.at < 5000) return;
+        return { key, at: now };
+    });
+    return res.committed;
+};
+
 export const listenRoom = (pin, callback) => {
     const roomRef = ref(db, `rooms/${pin}`);
     return onValue(roomRef, (snapshot) => {

@@ -2,7 +2,7 @@ import './style.css';
 import {
     createRoom, joinRoom, listenRoom, updateRoom, submitGuess,
     saveDeck, listenDecks, listenHostRooms, removeRoom, finishRoom,
-    loginOrRegisterHost, kickPlayer, duplicateRoom, claimScoring
+    loginOrRegisterHost, kickPlayer, duplicateRoom, claimScoring, claimTransition
 } from './db.js';
 
 // --- Helpers ---
@@ -407,8 +407,11 @@ function buildReadyUpdates(data, seed) {
 
     let unactedPlayers = players.filter(uid => !data.players[uid].acted);
     if (unactedPlayers.length === 0) {
+        // 사이클 완료 → 전원 acted 리셋. 단, 직전 연기자는 새 사이클 첫 연기자에서 제외해 연속 방지.
         players.forEach(uid => (updates[`players/${uid}/acted`] = false));
-        unactedPlayers = players; // 이미 정렬됨
+        const prevActor = data.currentRound?.actorId;
+        unactedPlayers = prevActor ? players.filter(uid => uid !== prevActor) : players;
+        if (unactedPlayers.length === 0) unactedPlayers = players; // 안전장치(전원 제외 방지)
     }
 
     const s = Math.abs(Math.floor(seed || 0));
@@ -459,20 +462,17 @@ function runDistributedChecks(data) {
         }
     } else if (data.status === 'result' && data.currentRound && data.currentRound.nextRoundTime) {
         // 결과 카운트다운 종료 → 다음 라운드 '준비(ready)' 상태로 자동 전환.
-        // 결정론적 계산이라 접속한 모든 클라이언트가 실행해도 결과가 동일(멱등).
-        if (now > data.currentRound.nextRoundTime + 500 && !isStartingRound
-            && autoStartedKey !== data.currentRound.nextRoundTime) {
-            autoStartedKey = data.currentRound.nextRoundTime;
-            transitionToReady(data, data.currentRound.startTime);
+        // 다음 라운드 구성은 claimTransition 잠금으로 한 클라이언트만 수행(연기자 분기 방지).
+        if (now > data.currentRound.nextRoundTime + 500 && !isStartingRound) {
+            transitionToReady(data, data.currentRound.startTime, 'next_' + data.currentRound.nextRoundTime);
         }
     } else if (data.status === 'ready' && data.currentRound) {
         const actorId = data.currentRound.actorId;
         // 안전장치 1: 준비 상태에서 연기자가 나가버리면(강퇴/이탈) 다른 사람으로 재구성
         if (!data.players || !data.players[actorId]) {
-            const rebuildKey = 'rebuild_' + actorId;
-            if (!isStartingRound && autoStartedKey !== rebuildKey) {
-                autoStartedKey = rebuildKey;
-                transitionToReady(data); // seed 미지정 → 참가자 목록 해시로 결정론 계산
+            if (!isStartingRound) {
+                // seed 미지정 → 참가자 목록 해시로 계산. 잠금으로 한 명만 재구성.
+                transitionToReady(data, undefined, 'rebuild_' + actorId);
             }
         }
         // 안전장치 2: 연기자가 접속은 되어 있으나 준비완료를 오래 안 누르면 자동으로 연기 시작(무한 대기 방지)
@@ -489,10 +489,15 @@ function runDistributedChecks(data) {
     }
 }
 
-// 다음 라운드를 ready 상태로 전환. seed가 없으면 참가자 uid 목록 해시를 사용(결정론).
-async function transitionToReady(data, seed) {
+// 다음 라운드를 ready 상태로 전환. seed가 없으면 참가자 uid 목록 해시를 사용.
+// claimKey가 있으면 트랜잭션 잠금을 얻은 클라이언트만 구성 → 연기자 분기·acted 이중표시 방지.
+async function transitionToReady(data, seed, claimKey) {
     isStartingRound = true;
     try {
+        if (claimKey) {
+            const won = await claimTransition(currentPin, claimKey);
+            if (!won) return; // 다른 클라이언트가 이미 이 전환을 구성 중
+        }
         const effectiveSeed = (seed != null)
             ? seed
             : hashString(Object.keys(data.players || {}).sort().join(','));
