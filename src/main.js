@@ -2,7 +2,7 @@ import './style.css';
 import {
     createRoom, joinRoom, listenRoom, updateRoom, submitGuess,
     saveDeck, listenDecks, listenHostRooms, removeRoom, finishRoom,
-    loginOrRegisterHost, kickPlayer, duplicateRoom, claimScoring, claimTransition
+    loginOrRegisterHost, kickPlayer, duplicateRoom, claimScoring, claimTransition, getRoom
 } from './db.js';
 
 // --- Helpers ---
@@ -681,6 +681,13 @@ async function calculateScores(data) {
     const won = await claimScoring(currentPin);
     if (!won) return;
 
+    // 채점 권한 획득 후 최신 스냅샷을 다시 읽는다.
+    // (로컬 리스너에 아직 도착하지 않은 '막판 제출'을 누락해 정답자를 시간초과로 처리하는 것을 방지)
+    const fresh = await getRoom(currentPin);
+    if (!fresh || !fresh.currentRound) return;
+    if (fresh.currentRound.nextRoundTime) return; // 그새 다른 클라이언트가 채점을 마침(멱등)
+    data = fresh;
+
     if (data.currentRound.isVoided) {
         await updateRoom(currentPin, { status: 'result', 'currentRound/nextRoundTime': Date.now() + 10000 });
         return;
@@ -709,10 +716,15 @@ async function calculateScores(data) {
     correctGuessers.sort((a, b) => a.order - b.order);
     const updates = {};
 
-    const actorTotal = 10 + (correctGuessers.length * 5);
-    updates[`players/${actorId}/score`] = (players[actorId].score || 0) + actorTotal;
-    updates[`players/${actorId}/roundScore`] = actorTotal;
-    updates[`players/${actorId}/roundPenalty`] = 0;
+    // 연기자가 라운드 도중 이탈/강퇴되면 players[actorId]가 없어 여기서 크래시 → 채점 전체가 죽고
+    // 순위표가 안 뜬 채 방이 멈추는 문제가 있었다. 연기자가 남아있을 때만 연기자 점수를 반영한다.
+    const actor = players[actorId];
+    if (actor) {
+        const actorTotal = 10 + (correctGuessers.length * 5);
+        updates[`players/${actorId}/score`] = (actor.score || 0) + actorTotal;
+        updates[`players/${actorId}/roundScore`] = actorTotal;
+        updates[`players/${actorId}/roundPenalty`] = 0;
+    }
 
     correctGuessers.forEach((g, index) => {
         const pts = index === 0 ? 30 : index === 1 ? 20 : 10;
@@ -797,10 +809,13 @@ function handlePlayerUpdate(data) {
     if (data.status === 'finished') {
         showScreen('screen-final-result');
         elFinalResultList.innerHTML = '';
-        const sorted = Object.values(players).sort((a, b) => (b.finalScore || 0) - (a.finalScore || 0));
+        // 정렬 기준과 표시 값을 동일하게(finalScore가 아직 없는 학생은 score - 패널티로 계산)
+        // → 종료 직전 입장 등으로 finalScore가 안 찍힌 학생이 0점으로 정렬되며 100점으로 표시되던 불일치 제거
+        const finalOf = (p) => p.finalScore ?? ((p.score ?? 0) - (p.penalties || 0) * 20);
+        const sorted = Object.values(players).sort((a, b) => finalOf(b) - finalOf(a));
         sorted.forEach((p, idx) => {
             const li = document.createElement('li');
-            li.innerHTML = `<span>${idx === 0 ? '👑' : ''} ${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${p.finalScore ?? p.score ?? 0}점 (패널티 -${(p.penalties || 0) * 20}점 반영)</span>`;
+            li.innerHTML = `<span>${idx === 0 ? '👑' : ''} ${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${finalOf(p)}점 (패널티 -${(p.penalties || 0) * 20}점 반영)</span>`;
             if (p.nickname === me.nickname) li.style.color = '#FCD34D';
             elFinalResultList.appendChild(li);
         });

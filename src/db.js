@@ -121,6 +121,12 @@ export const claimTransition = async (pin, key) => {
     return res.committed;
 };
 
+// 채점 직전 최신 스냅샷을 한 번에 다시 읽기(막판 제출 반영용)
+export const getRoom = async (pin) => {
+    const snapshot = await get(ref(db, `rooms/${pin}`));
+    return snapshot.exists() ? snapshot.val() : null;
+};
+
 export const listenRoom = (pin, callback) => {
     const roomRef = ref(db, `rooms/${pin}`);
     return onValue(roomRef, (snapshot) => {
