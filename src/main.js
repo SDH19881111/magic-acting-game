@@ -34,6 +34,16 @@ function joinedBeforeRound(player, round) {
     return (player.joinTime || 0) <= (round.startTime || 0) + JOIN_BUFFER;
 }
 
+// 진행 중/최종 순위표에서 공통으로 쓰는 '실점수' = 기본점수 - 시간초과 패널티(개당 20점).
+// (예전엔 진행 중 화면이 패널티 미반영 score를 보여줘, 최종에서만 -20씩 빠지며 순위가 뒤집혔음)
+function effectiveScore(p) {
+    return (p?.score ?? 0) - (p?.penalties || 0) * 20;
+}
+// 이번 라운드 실점수 변화량 = 라운드 점수 - 이번 라운드 패널티(개당 20점)
+function roundDelta(p) {
+    return (p?.roundScore || 0) - (p?.roundPenalty || 0) * 20;
+}
+
 // --- DOM Elements ---
 const screens = document.querySelectorAll('.screen');
 function showScreen(id) {
@@ -533,7 +543,7 @@ function handleHostUpdate(data) {
         if (uid === actorId) li.classList.add('is-actor');
 
         const info = document.createElement('span');
-        info.textContent = `${p.nickname} : ${p.score}점 (패널티 ${p.penalties || 0})`;
+        info.textContent = `${p.nickname} : ${effectiveScore(p)}점 (패널티 ${p.penalties || 0}개)`;
 
         const kickBtn = document.createElement('button');
         kickBtn.className = 'btn-delete-word';
@@ -802,7 +812,7 @@ function handlePlayerUpdate(data) {
     }
     wasInRoom = true;
 
-    elMyScore.innerText = me.score || 0;
+    elMyScore.innerText = effectiveScore(me);
     const amActor = data.currentRound?.actorId === currentUid;
     const joinedMidRound = !joinedBeforeRound(me, data.currentRound);
 
@@ -811,7 +821,7 @@ function handlePlayerUpdate(data) {
         elFinalResultList.innerHTML = '';
         // 정렬 기준과 표시 값을 동일하게(finalScore가 아직 없는 학생은 score - 패널티로 계산)
         // → 종료 직전 입장 등으로 finalScore가 안 찍힌 학생이 0점으로 정렬되며 100점으로 표시되던 불일치 제거
-        const finalOf = (p) => p.finalScore ?? ((p.score ?? 0) - (p.penalties || 0) * 20);
+        const finalOf = (p) => p.finalScore ?? effectiveScore(p);
         const sorted = Object.values(players).sort((a, b) => finalOf(b) - finalOf(a));
         sorted.forEach((p, idx) => {
             const li = document.createElement('li');
@@ -875,14 +885,13 @@ function handlePlayerUpdate(data) {
         elResultSituation.innerText = data.currentRound.targetSituation;
 
         elResultList.innerHTML = '';
-        const sorted = Object.values(players).sort((a, b) => (b.score || 0) - (a.score || 0));
+        const sorted = Object.values(players).sort((a, b) => effectiveScore(b) - effectiveScore(a));
         sorted.forEach((p, idx) => {
             const li = document.createElement('li');
-            const roundPts = p.roundScore !== undefined
-                ? (p.roundScore > 0 ? `<span style="color:#34D399; font-size:0.9rem;">(+${p.roundScore})</span>`
-                    : p.roundScore < 0 ? `<span style="color:#F87171; font-size:0.9rem;">(${p.roundScore})</span>` : '')
-                : '';
-            li.innerHTML = `<span>${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${p.score}점 ${roundPts}</span>`;
+            const d = roundDelta(p);
+            const roundPts = d > 0 ? `<span style="color:#34D399; font-size:0.9rem;">(+${d})</span>`
+                : d < 0 ? `<span style="color:#F87171; font-size:0.9rem;">(${d})</span>` : '';
+            li.innerHTML = `<span>${idx + 1}위. ${escapeHtml(p.nickname)}</span> <span>${effectiveScore(p)}점 ${roundPts}</span>`;
             if (p.nickname === me.nickname) li.style.color = '#FCD34D';
             elResultList.appendChild(li);
         });
