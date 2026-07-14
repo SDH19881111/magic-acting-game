@@ -84,6 +84,7 @@ export const joinRoom = async (pin, nickname) => {
             guess1: null,
             guess2: null,
             guessTime: null,
+            guessServerTime: null,
             roundScore: 0,
             roundPenalty: 0,
             joinTime: serverTimestamp()
@@ -134,7 +135,8 @@ export const submitGuess = async (pin, uid, guess1, guess2, guessTime) => {
         hasGuessed: true,
         guess1,
         guess2,
-        guessTime
+        guessTime,
+        guessServerTime: serverTimestamp() // 순위 판정용 서버시각(기기 시계 오차 무관)
     });
 };
 

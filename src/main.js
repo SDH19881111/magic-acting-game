@@ -400,6 +400,7 @@ function buildReadyUpdates(data, seed) {
         updates[`players/${uid}/guess1`] = null;
         updates[`players/${uid}/guess2`] = null;
         updates[`players/${uid}/guessTime`] = null;
+        updates[`players/${uid}/guessServerTime`] = null;
         updates[`players/${uid}/roundScore`] = 0;
         updates[`players/${uid}/roundPenalty`] = 0;
     });
@@ -693,11 +694,14 @@ async function calculateScores(data) {
         if (!joinedBeforeRound(p, data.currentRound)) return;
 
         if (!p.hasGuessed) timeoutGuessers.push(uid);
-        else if (p.guess1 === targetEmotion && p.guess2 === targetSituation) correctGuessers.push({ uid, guessTime: p.guessTime });
+        else if (p.guess1 === targetEmotion && p.guess2 === targetSituation) {
+            // 순위 판정은 각 기기 로컬시각(guessTime) 대신 Firebase 서버시각으로 → 시계 오차 무관 공정
+            correctGuessers.push({ uid, order: p.guessServerTime ?? p.guessTime ?? 0 });
+        }
         else wrongGuessers.push(uid);
     });
 
-    correctGuessers.sort((a, b) => a.guessTime - b.guessTime);
+    correctGuessers.sort((a, b) => a.order - b.order);
     const updates = {};
 
     const actorTotal = 10 + (correctGuessers.length * 5);
@@ -713,10 +717,10 @@ async function calculateScores(data) {
     });
 
     wrongGuessers.forEach(uid => {
+        // 오답: 즉시 -5점만. (penalty는 부여하지 않음 → 최종 -20 이중차감 방지)
         updates[`players/${uid}/score`] = (players[uid].score || 0) - 5;
         updates[`players/${uid}/roundScore`] = -5;
-        updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
-        updates[`players/${uid}/roundPenalty`] = 1;
+        updates[`players/${uid}/roundPenalty`] = 0;
     });
     timeoutGuessers.forEach(uid => {
         updates[`players/${uid}/penalties`] = (players[uid].penalties || 0) + 1;
