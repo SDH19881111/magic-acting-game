@@ -1,5 +1,5 @@
 import { db } from './firebase.js';
-import { ref, set, get, update, onValue, serverTimestamp, remove, runTransaction } from "firebase/database";
+import { ref, set, get, update, onValue, serverTimestamp, remove, runTransaction, onDisconnect } from "firebase/database";
 
 const DEFAULT_CARDS = {
     emotions: ['기쁨', '슬픔', '분노', '놀람', '두려움', '당황', '행복', '짜증'],
@@ -91,6 +91,16 @@ export const joinRoom = async (pin, nickname) => {
         });
     } else {
         await update(playerRef, { nickname });
+    }
+
+    // 접속이 끊기면(브라우저 종료/네트워크 단절) 이 플레이어를 자동으로 방에서 제거.
+    // 유령 플레이어가 연기자로 뽑혀 라운드가 25초씩 멈추거나, 정답 미제출로 라운드가
+    // 끝까지 지연되는 문제를 방지한다. (재접속하면 joinRoom에서 onDisconnect가 다시 등록됨)
+    try {
+        await onDisconnect(playerRef).remove();
+    } catch (e) {
+        // onDisconnect 등록 실패는 치명적이지 않으므로 게임 참가는 계속 진행
+        console.warn('onDisconnect 등록 실패:', e);
     }
 
     return { uid, roomData: snapshot.val() };

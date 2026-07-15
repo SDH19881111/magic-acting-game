@@ -242,11 +242,15 @@ const STATUS_LABEL = {
 
 function renderRoomList(rooms) {
     hostRoomsData = rooms;
-    if (chkSelectAll) chkSelectAll.checked = false;
+    // 이 리스너는 /rooms 전체를 구독하므로 어느 방에서든 플레이어가 움직이면 재렌더된다.
+    // 매번 새로 그리면 호스트가 방금 체크한 선택이 지워져(선택 시작/종료/삭제 불가) 버리므로,
+    // 재렌더 전에 체크된 PIN을 기억해 두었다가 다시 그린 뒤 복원한다.
+    const checkedBefore = new Set(getCheckedPins());
     elHostRoomList.innerHTML = '';
 
     const pins = Object.keys(rooms);
     if (pins.length === 0) {
+        if (chkSelectAll) chkSelectAll.checked = false;
         elHostRoomList.innerHTML = '<li style="opacity:0.7; justify-content:center;">아직 만든 방이 없습니다.</li>';
         return;
     }
@@ -259,9 +263,10 @@ function renderRoomList(rooms) {
         li.style.alignItems = 'center';
         const count = r.players ? Object.keys(r.players).length : 0;
         const statusLabel = STATUS_LABEL[r.status] || r.status;
+        const checkedAttr = checkedBefore.has(pin) ? ' checked' : '';
         li.innerHTML = `
             <div style="display:flex; align-items:center; gap:10px;">
-                <input type="checkbox" class="room-checkbox" value="${pin}" style="width:20px; height:20px;">
+                <input type="checkbox" class="room-checkbox" value="${pin}"${checkedAttr} style="width:20px; height:20px;">
                 <div><strong>[${pin}]</strong> ${escapeHtml(r.title)} <br><small>상태: ${statusLabel} | 접속자: ${count}명</small></div>
             </div>
             <div class="room-actions">
@@ -271,6 +276,11 @@ function renderRoomList(rooms) {
         `;
         elHostRoomList.appendChild(li);
     });
+
+    // '전체 선택' 체크박스는 현재 모든 방이 선택된 상태와 동기화(부분 선택이면 해제).
+    if (chkSelectAll) {
+        chkSelectAll.checked = pins.every(pin => checkedBefore.has(pin));
+    }
 
     elHostRoomList.querySelectorAll('.btn-manage-room').forEach(btn => {
         btn.onclick = (e) => enterHostRoom(e.currentTarget.dataset.pin);
@@ -560,9 +570,12 @@ function handleHostUpdate(data) {
     });
 
     if (data.settings) {
-        settingWatchTime.value = data.settings.watchTime;
-        settingGuessTime.value = data.settings.guessTime;
-        settingCardCount.value = data.settings.cardCount;
+        // 이 리스너는 플레이어가 정답을 낼 때마다 발화하므로, 호스트가 설정값을 편집하는 중이면
+        // (해당 input에 포커스가 있으면) 저장 전 입력이 원래 값으로 튕기지 않도록 덮어쓰지 않는다.
+        const active = document.activeElement;
+        if (active !== settingWatchTime) settingWatchTime.value = data.settings.watchTime;
+        if (active !== settingGuessTime) settingGuessTime.value = data.settings.guessTime;
+        if (active !== settingCardCount) settingCardCount.value = data.settings.cardCount;
     }
 
     // 첫 시작만 호스트가 누르고, 이후 라운드는 자동 진행되므로 대기 상태에서만 활성화
