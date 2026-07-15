@@ -237,7 +237,7 @@ btnLogout?.addEventListener('click', () => {
 // --- Host Lobby: 방 목록 렌더링 ---
 const STATUS_LABEL = {
     waiting: '대기중', acting: '진행중', guessing: '진행중',
-    result: '결과 발표', finished: '종료됨', calculating_final: '종료 처리중'
+    result: '결과 발표', finished: '종료됨'
 };
 
 function renderRoomList(rooms) {
@@ -406,7 +406,9 @@ function buildReadyUpdates(data, seed) {
         return { error: '참가자가 없습니다.' };
     }
     const players = Object.keys(data.players).sort(); // 정렬로 순서 고정 → 결정론 보장
-    if (players.length < 2) return { error: '최소 2명이 필요합니다.' };
+    // 접속 중(online)인 학생만 연기자·정답 대상. 오프라인/강퇴 학생은 노드는 남아있지만 제외한다.
+    const onlinePlayers = players.filter(uid => data.players[uid].online !== false);
+    if (onlinePlayers.length < 2) return { error: '접속 중인 참가자가 최소 2명 필요합니다.' };
 
     const emotions = data.cards?.emotions || [];
     const situations = data.cards?.situations || [];
@@ -425,13 +427,13 @@ function buildReadyUpdates(data, seed) {
         updates[`players/${uid}/roundPenalty`] = 0;
     });
 
-    let unactedPlayers = players.filter(uid => !data.players[uid].acted);
+    let unactedPlayers = onlinePlayers.filter(uid => !data.players[uid].acted);
     if (unactedPlayers.length === 0) {
         // 사이클 완료 → 전원 acted 리셋. 단, 직전 연기자는 새 사이클 첫 연기자에서 제외해 연속 방지.
         players.forEach(uid => (updates[`players/${uid}/acted`] = false));
         const prevActor = data.currentRound?.actorId;
-        unactedPlayers = prevActor ? players.filter(uid => uid !== prevActor) : players;
-        if (unactedPlayers.length === 0) unactedPlayers = players; // 안전장치(전원 제외 방지)
+        unactedPlayers = prevActor ? onlinePlayers.filter(uid => uid !== prevActor) : onlinePlayers;
+        if (unactedPlayers.length === 0) unactedPlayers = onlinePlayers; // 안전장치(전원 제외 방지)
     }
 
     const s = Math.abs(Math.floor(seed || 0));
@@ -457,11 +459,6 @@ function runDistributedChecks(data) {
     if (!data || !currentPin) return;
     const now = Date.now();
 
-    if (data.status === 'calculating_final') {
-        finishRoom(currentPin, data.players || {});
-        return;
-    }
-
     if (data.status === 'acting' && data.currentRound) {
         const endTime = data.currentRound.startTime + ((data.settings?.watchTime || 30) * 1000);
         if (now > endTime + 500) {
@@ -473,6 +470,7 @@ function runDistributedChecks(data) {
         Object.keys(data.players || {}).forEach(uid => {
             const p = data.players[uid];
             if (uid === data.currentRound.actorId) return;
+            if (p.online === false) return; // 오프라인/강퇴 학생은 정답 대상에서 제외
             if (!joinedBeforeRound(p, data.currentRound)) return; // 라운드 도중 입장자는 무시
             if (!p.hasGuessed) allGuessed = false;
         });
@@ -488,8 +486,9 @@ function runDistributedChecks(data) {
         }
     } else if (data.status === 'ready' && data.currentRound) {
         const actorId = data.currentRound.actorId;
-        // 안전장치 1: 준비 상태에서 연기자가 나가버리면(강퇴/이탈) 다른 사람으로 재구성
-        if (!data.players || !data.players[actorId]) {
+        const actor = data.players?.[actorId];
+        // 안전장치 1: 준비 상태에서 연기자가 나가거나(강퇴/이탈) 접속이 끊기면(online:false) 다른 사람으로 재구성
+        if (!actor || actor.online === false) {
             if (!isStartingRound) {
                 // seed 미지정 → 참가자 목록 해시로 계산. 잠금으로 한 명만 재구성.
                 transitionToReady(data, undefined, 'rebuild_' + actorId);
@@ -542,30 +541,37 @@ function handleHostUpdate(data) {
     elHostPin.innerText = currentPin;
 
     const players = data.players || {};
-    elHostPlayerCount.innerText = Object.keys(players).length;
+    // 접속 중인 학생 수를 표시(오프라인/강퇴는 노드는 남지만 실제 참가 인원이 아님)
+    const onlineCount = Object.values(players).filter(p => p.online !== false).length;
+    elHostPlayerCount.innerText = onlineCount;
     elHostPlayerList.innerHTML = '';
 
     const actorId = data.currentRound?.actorId;
 
     Object.keys(players).forEach(uid => {
         const p = players[uid];
+        const isOffline = p.online === false;
         const li = document.createElement('li');
         if (uid === actorId) li.classList.add('is-actor');
+        if (isOffline) li.style.opacity = '0.5';
 
+        const statusTag = p.kicked ? ' (강퇴됨)' : isOffline ? ' (오프라인)' : '';
         const info = document.createElement('span');
-        info.textContent = `${p.nickname} : ${effectiveScore(p)}점 (패널티 ${p.penalties || 0}개)`;
-
-        const kickBtn = document.createElement('button');
-        kickBtn.className = 'btn-delete-word';
-        kickBtn.textContent = '강퇴';
-        kickBtn.onclick = async () => {
-            if (confirm(`'${p.nickname}' 님을 방에서 내보낼까요?`)) {
-                await kickPlayer(currentPin, uid);
-            }
-        };
+        info.textContent = `${p.nickname}${statusTag} : ${effectiveScore(p)}점 (패널티 ${p.penalties || 0}개)`;
 
         li.appendChild(info);
-        li.appendChild(kickBtn);
+        // 접속 중인 학생만 강퇴 버튼 노출(오프라인/강퇴 상태에는 의미 없음)
+        if (!isOffline) {
+            const kickBtn = document.createElement('button');
+            kickBtn.className = 'btn-delete-word';
+            kickBtn.textContent = '강퇴';
+            kickBtn.onclick = async () => {
+                if (confirm(`'${p.nickname}' 님을 방에서 내보낼까요?\n(같은 기기로 다시 들어오면 점수는 이어집니다)`)) {
+                    await kickPlayer(currentPin, uid);
+                }
+            };
+            li.appendChild(kickBtn);
+        }
         elHostPlayerList.appendChild(li);
     });
 
@@ -726,6 +732,7 @@ async function calculateScores(data) {
     Object.keys(players).forEach(uid => {
         if (uid === actorId) return;
         const p = players[uid];
+        if (p.online === false) return; // 오프라인/강퇴 학생은 채점 제외(시간초과 패널티도 안 줌)
         if (!joinedBeforeRound(p, data.currentRound)) return;
 
         if (!p.hasGuessed) timeoutGuessers.push(uid);
@@ -742,7 +749,7 @@ async function calculateScores(data) {
     // 연기자가 라운드 도중 이탈/강퇴되면 players[actorId]가 없어 여기서 크래시 → 채점 전체가 죽고
     // 순위표가 안 뜬 채 방이 멈추는 문제가 있었다. 연기자가 남아있을 때만 연기자 점수를 반영한다.
     const actor = players[actorId];
-    if (actor) {
+    if (actor && actor.online !== false) {
         const actorTotal = 10 + (correctGuessers.length * 5);
         updates[`players/${actorId}/score`] = (actor.score || 0) + actorTotal;
         updates[`players/${actorId}/roundScore`] = actorTotal;
@@ -814,13 +821,22 @@ function handlePlayerUpdate(data) {
     const players = data.players || {};
     const me = players[currentUid];
     if (!me) {
-        // 내가 방에 있다가 사라짐 → 강퇴됨
+        // 내 노드 자체가 사라짐(직접 삭제 등) → 방에서 나감 처리
         if (wasInRoom) {
             wasInRoom = false;
             if (playerRoomUnsub) { playerRoomUnsub(); playerRoomUnsub = null; }
-            alert('선생님에 의해 방에서 나가게 되었습니다.');
+            alert('방에서 나가게 되었습니다.');
             location.reload();
         }
+        return;
+    }
+    // 강퇴됨: 노드는 점수 보존을 위해 남아있고 kicked 플래그로 표시된다.
+    // (같은 기기로 다시 입장하면 joinRoom이 kicked를 해제하고 점수를 이어받게 함)
+    if (me.kicked) {
+        wasInRoom = false;
+        if (playerRoomUnsub) { playerRoomUnsub(); playerRoomUnsub = null; }
+        alert('선생님에 의해 방에서 나가게 되었습니다.');
+        location.reload();
         return;
     }
     wasInRoom = true;
@@ -828,6 +844,10 @@ function handlePlayerUpdate(data) {
     elMyScore.innerText = effectiveScore(me);
     const amActor = data.currentRound?.actorId === currentUid;
     const joinedMidRound = !joinedBeforeRound(me, data.currentRound);
+
+    // 이전 화면의 카운트다운 인터벌을 먼저 정지. 타이머가 필요한 화면(연기/관람/문제풀이/결과)은
+    // 아래 분기에서 매번 자기 타이머를 다시 설정하므로, 대기·준비·최종 화면에선 자연히 멈춘 상태가 된다.
+    stopLocalTimer();
 
     if (data.status === 'finished') {
         showScreen('screen-final-result');
@@ -936,6 +956,11 @@ btnActorDone.addEventListener('click', async () => {
 });
 
 // Timers
+// 화면 전환 등으로 더 이상 필요 없는 카운트다운 인터벌을 확실히 정지(숨은 요소에 계속 쓰는 것 방지).
+function stopLocalTimer() {
+    clearInterval(localTimerInterval);
+    localTimerInterval = null;
+}
 function updateActorTimer(st, wt) {
     clearInterval(localTimerInterval);
     localTimerInterval = setInterval(() => {
@@ -989,11 +1014,19 @@ function showSyncPopup() {
 }
 
 // Guess Cards Rendering
+// Fisher–Yates: O(n) 균등 셔플. sort(()=>0.5-Math.random())는 비교기가 일관되지 않아
+// 균등 순열이 아니었고(정답이 앞쪽에 몰리는 편향), 이를 제거하기 위해 교체.
+function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+
 function getRandomCards(target, list, count) {
-    const others = [...new Set(list.filter(item => item !== target))];
-    others.sort(() => 0.5 - Math.random());
-    const selected = [target, ...others.slice(0, count - 1)];
-    selected.sort(() => 0.5 - Math.random());
+    const others = shuffle([...new Set(list.filter(item => item !== target))]);
+    const selected = shuffle([target, ...others.slice(0, count - 1)]);
     return selected;
 }
 

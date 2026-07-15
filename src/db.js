@@ -87,17 +87,20 @@ export const joinRoom = async (pin, nickname) => {
             guessServerTime: null,
             roundScore: 0,
             roundPenalty: 0,
+            online: true,
             joinTime: serverTimestamp()
         });
     } else {
-        await update(playerRef, { nickname });
+        // 기존 노드가 있으면(끊김/강퇴 후 같은 기기로 재접속) 점수·페널티는 그대로 두고
+        // 온라인 상태로 되살린다. kicked 플래그도 해제해 다시 정상 참가시킨다.
+        await update(playerRef, { nickname, online: true, kicked: null });
     }
 
-    // 접속이 끊기면(브라우저 종료/네트워크 단절) 이 플레이어를 자동으로 방에서 제거.
-    // 유령 플레이어가 연기자로 뽑혀 라운드가 25초씩 멈추거나, 정답 미제출로 라운드가
-    // 끝까지 지연되는 문제를 방지한다. (재접속하면 joinRoom에서 onDisconnect가 다시 등록됨)
+    // 접속이 끊기면(브라우저 종료/네트워크 단절) 노드를 지우지 않고 online:false 로만 표시한다.
+    // 이렇게 하면 (1) 오프라인 학생은 연기자 선정·채점에서 제외돼 라운드가 멈추지 않고,
+    //          (2) 점수/페널티가 보존돼 같은 기기로 재접속하면 그대로 이어받는다.
     try {
-        await onDisconnect(playerRef).remove();
+        await onDisconnect(playerRef).update({ online: false });
     } catch (e) {
         // onDisconnect 등록 실패는 치명적이지 않으므로 게임 참가는 계속 진행
         console.warn('onDisconnect 등록 실패:', e);
@@ -149,13 +152,10 @@ export const updateRoom = async (pin, updates) => {
     await update(roomRef, updates);
 };
 
-export const updatePlayer = async (pin, uid, updates) => {
-    const playerRef = ref(db, `rooms/${pin}/players/${uid}`);
-    await update(playerRef, updates);
-};
-
 export const kickPlayer = async (pin, uid) => {
-    await remove(ref(db, `rooms/${pin}/players/${uid}`));
+    // 노드를 삭제하지 않고 오프라인+강퇴 표시만 한다. 점수를 보존해, 같은 기기로 다시 들어오면
+    // joinRoom에서 kicked 해제 + online 복원으로 이전 점수를 이어받게 하기 위함.
+    await update(ref(db, `rooms/${pin}/players/${uid}`), { online: false, kicked: true });
 };
 
 export const submitGuess = async (pin, uid, guess1, guess2, guessTime) => {
